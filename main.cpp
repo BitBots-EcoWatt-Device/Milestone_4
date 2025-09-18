@@ -5,6 +5,7 @@
 #include <chrono>
 #include "Inverter.h"
 #include "PollingConfig.h"
+#include "compress.h"
 
 // ================= Buffer ==================
 class DataBuffer
@@ -84,28 +85,81 @@ void uploadLoop(DataBuffer &buf, std::chrono::milliseconds upInt, const PollingC
     {
         std::this_thread::sleep_for(upInt);
         auto data = buf.flush();
-        if (!data.empty())
-        {
-            std::cout << "Uploading " << data.size() << " samples\n";
-            for (auto &s : data)
-            {
-                std::cout << "t=" << s.timestamp << " ms";
 
-                // Print all polled parameters
-                for (auto paramType : config.getEnabledParameters())
-                {
-                    if (s.hasValue(paramType))
-                    {
-                        const auto &paramConfig = config.getParameterConfig(paramType);
-                        std::cout << " " << paramConfig.name << "=" << s.getValue(paramType)
-                                  << paramConfig.unit;
-                    }
-                }
-                std::cout << "\n";
+        // *** check buffer is empty?
+        for (const auto& sample : data)
+        {
+            std::cout << "Uncompressed Sample - t=" << sample.timestamp << " ms";
+            for (auto paramType : config.getEnabledParameters())
+            {
+            if (sample.hasValue(paramType))
+            {
+                const auto &paramConfig = config.getParameterConfig(paramType);
+                std::cout << " " << paramConfig.name << "=" << sample.getValue(paramType)
+                      << paramConfig.unit;
+            }
+            }
+            std::cout << "\n";
+        }
+
+        for (const auto& sample : data)
+        {
+            std::vector<CompressionResult> compressed_samples = compressBufferDelta({sample});
+
+
+            for (const auto& result : compressed_samples)
+            {
+                std::cout << "Parameter: " << static_cast<int>(result.param)
+                          << ", Method: " << result.method
+                          << ", Original Size: " << result.originalSize
+                          << ", Compressed Size: " << result.compressedSize
+                          << ", Ratio: " << result.ratio
+                          << ", CPU Time (ms): " << result.cpuTimeMs
+                          << ", Verified: " << (result.verified ? "Yes" : "No")
+                          << "\n";
             }
         }
-        else
-            std::cout << "No data\n";
+
+        for (const auto& sample : data)
+        {
+            std::vector<CompressionResult> compressed_samples_RLE = compressBufferRle({sample});
+
+            for (const auto& result : compressed_samples_RLE)
+            {
+                std::cout << "Parameter: " << static_cast<int>(result.param)
+                          << ", Method: " << result.method
+                          << ", Original Size: " << result.originalSize
+                          << ", Compressed Size: " << result.compressedSize
+                          << ", Ratio: " << result.ratio
+                          << ", CPU Time (ms): " << result.cpuTimeMs
+                          << ", Verified: " << (result.verified ? "Yes" : "No")
+                          << "\n";
+            }
+        }
+
+        // if (!data.empty())
+        // {
+        //     std::cout << "Uploading " << data.size() << " samples\n";
+            
+        //     for (auto &s : data)
+        //     {
+        //         std::cout << "t=" << s.timestamp << " ms";
+
+        //         // Print all polled parameters
+        //         for (auto paramType : config.getEnabledParameters())
+        //         {
+        //             if (s.hasValue(paramType))
+        //             {
+        //                 const auto &paramConfig = config.getParameterConfig(paramType);
+        //                 std::cout << " " << paramConfig.name << "=" << s.getValue(paramType)
+        //                           << paramConfig.unit;
+        //             }
+        //         }
+        //         std::cout << "\n";
+        //     }
+        // }
+        // else
+        //     std::cout << "No data\n";
     }
 }
 

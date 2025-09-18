@@ -2,7 +2,7 @@ CXX = g++
 CXXFLAGS = -std=c++11 -I.
 LDFLAGS = -lcurl
 
-SOURCES = ModbusHandler.cpp ProtocolAdapter.cpp Inverter.cpp Config.cpp PollingConfig.cpp
+SOURCES = ModbusHandler.cpp ProtocolAdapter.cpp Inverter.cpp Config.cpp PollingConfig.cpp compress.cpp
 
 all: run tests
 
