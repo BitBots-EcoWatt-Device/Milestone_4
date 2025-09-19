@@ -46,7 +46,14 @@ std::string build_meta_json(const std::string& device_id, long long timestamp,
         ss << "\"param_id\":" << f.param_id << ",";
         ss << "\"n_samples\":" << f.n_samples << ",";
         ss << "\"bytes_len\":" << f.payload.size() << ",";
-        ss << "\"cpu_time_ms\":" << f.cpu_time_ms;
+        ss << "\"cpu_time_ms\":" << f.cpu_time_ms << ",";
+        // Add payload as array of integers
+        ss << "\"payload\":[";
+        for (size_t j = 0; j < f.payload.size(); ++j) {
+            ss << f.payload[j];
+            if (j + 1 < f.payload.size()) ss << ",";
+        }
+        ss << "]";
         ss << "}";
         if (i + 1 < fields.size()) ss << ",";
     }

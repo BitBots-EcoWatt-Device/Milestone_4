@@ -118,25 +118,32 @@ void uploadLoop(DataBuffer &buf, std::chrono::milliseconds upInt, const PollingC
             for (const auto& result : compressed_samples_Delta)
             {
                 CompressedFieldBinary field;
-                field.param_name = to_string(result.param); // or use a mapping to names
-                field.method = result.method;
                 field.param_id = static_cast<int>(result.param);
+                field.param_name = to_string(result.param); // or use a mapping to names
+                field.payload = result.compressed_value; // assuming std::vector<uint32_t>
+                field.method = result.method;
                 field.n_samples = result.nSamples; // if available, else 1
                 field.cpu_time_ms = result.cpuTimeMs;
-                field.payload = result.compressed_value; // assuming std::vector<uint8_t>
                 fields_to_packet.push_back(field);
 
                 std::cout << "Parameter: " << static_cast<int>(result.param)
-                        << ", Method: " << result.method
-                        << ", Original Size: " << result.originalSize
-                        << ", Compressed Size: " << result.compressedSize
-                        << ", Ratio: " << result.ratio
-                        << ", CPU Time (ms): " << result.cpuTimeMs
-                        << ", Verified: " << (result.verified ? "Yes" : "No")
-                        << "\n";
+                          << ", Method: " << result.method
+                          << ", Samples: " << result.nSamples
+                          << ", Original Size: " << result.originalSize
+                          << ", Compressed Size: " << result.compressedSize
+                          << ", Ratio: " << result.ratio
+                          << ", CPU Time (ms): " << result.cpuTimeMs
+                          << ", Verified: " << (result.verified ? "Yes" : "No")
+                          << ", Compressed Values: [";
+                for (size_t i = 0; i < result.compressed_value.size(); ++i) {
+                    std::cout << result.compressed_value[i];
+                    if (i != result.compressed_value.size() - 1)
+                        std::cout << ", ";
+                }
+                std::cout << "]\n";
             }
-
             // Build the packet JSON
+            // Ensure build_meta_json serializes payload as a JSON array of numbers
             std::string packet_compressed_samples = build_meta_json("002", sample.timestamp, fields_to_packet);
             std::cout << "Packet JSON: " << packet_compressed_samples << "\n";
 
