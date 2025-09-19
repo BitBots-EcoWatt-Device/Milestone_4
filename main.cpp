@@ -6,6 +6,8 @@
 #include "Inverter.h"
 #include "PollingConfig.h"
 #include "compress.h"
+#include "packetizer.h"
+#include <curl/curl.h>
 
 // ================= Buffer ==================
 class DataBuffer
@@ -86,7 +88,11 @@ void uploadLoop(DataBuffer &buf, std::chrono::milliseconds upInt, const PollingC
         std::this_thread::sleep_for(upInt);
         auto data = buf.flush();
 
-        // *** check buffer is empty?
+        if (data.empty()) {
+            std::cout << "Buffer is empty, nothing to upload.\n";
+            return;
+        }
+
         for (const auto& sample : data)
         {
             std::cout << "Uncompressed Sample - t=" << sample.timestamp << " ms";
@@ -104,62 +110,63 @@ void uploadLoop(DataBuffer &buf, std::chrono::milliseconds upInt, const PollingC
 
         for (const auto& sample : data)
         {
-            std::vector<CompressionResult> compressed_samples = compressBufferDelta({sample});
+            std::vector<CompressionResult> compressed_samples_Delta = compressBufferDelta({sample});
 
-
-            for (const auto& result : compressed_samples)
-            {
-                std::cout << "Parameter: " << static_cast<int>(result.param)
-                          << ", Method: " << result.method
-                          << ", Original Size: " << result.originalSize
-                          << ", Compressed Size: " << result.compressedSize
-                          << ", Ratio: " << result.ratio
-                          << ", CPU Time (ms): " << result.cpuTimeMs
-                          << ", Verified: " << (result.verified ? "Yes" : "No")
-                          << "\n";
-            }
-        }
-
-        for (const auto& sample : data)
-        {
-            std::vector<CompressionResult> compressed_samples_RLE = compressBufferRle({sample});
-
-            for (const auto& result : compressed_samples_RLE)
-            {
-                std::cout << "Parameter: " << static_cast<int>(result.param)
-                          << ", Method: " << result.method
-                          << ", Original Size: " << result.originalSize
-                          << ", Compressed Size: " << result.compressedSize
-                          << ", Ratio: " << result.ratio
-                          << ", CPU Time (ms): " << result.cpuTimeMs
-                          << ", Verified: " << (result.verified ? "Yes" : "No")
-                          << "\n";
-            }
-        }
-
-        // if (!data.empty())
-        // {
-        //     std::cout << "Uploading " << data.size() << " samples\n";
+            // Convert CompressionResult to CompressedFieldBinary for packetization
+            std::vector<CompressedFieldBinary> fields_to_packet;
             
-        //     for (auto &s : data)
-        //     {
-        //         std::cout << "t=" << s.timestamp << " ms";
+            for (const auto& result : compressed_samples_Delta)
+            {
+                CompressedFieldBinary field;
+                field.param_name = to_string(result.param); // or use a mapping to names
+                field.method = result.method;
+                field.param_id = static_cast<int>(result.param);
+                field.n_samples = result.nSamples; // if available, else 1
+                field.cpu_time_ms = result.cpuTimeMs;
+                field.payload = result.compressed_value; // assuming std::vector<uint8_t>
+                fields_to_packet.push_back(field);
 
-        //         // Print all polled parameters
-        //         for (auto paramType : config.getEnabledParameters())
-        //         {
-        //             if (s.hasValue(paramType))
-        //             {
-        //                 const auto &paramConfig = config.getParameterConfig(paramType);
-        //                 std::cout << " " << paramConfig.name << "=" << s.getValue(paramType)
-        //                           << paramConfig.unit;
-        //             }
-        //         }
-        //         std::cout << "\n";
-        //     }
-        // }
-        // else
-        //     std::cout << "No data\n";
+                std::cout << "Parameter: " << static_cast<int>(result.param)
+                        << ", Method: " << result.method
+                        << ", Original Size: " << result.originalSize
+                        << ", Compressed Size: " << result.compressedSize
+                        << ", Ratio: " << result.ratio
+                        << ", CPU Time (ms): " << result.cpuTimeMs
+                        << ", Verified: " << (result.verified ? "Yes" : "No")
+                        << "\n";
+            }
+
+            // Build the packet JSON
+            std::string packet_compressed_samples = build_meta_json("002", sample.timestamp, fields_to_packet);
+            std::cout << "Packet JSON: " << packet_compressed_samples << "\n";
+
+            // Optionally, you can now upload using your upload_multipart function
+            // UploadResult res = upload_multipart(server_url, packet_compressed_samples, fields_to_packet, max_chunk_bytes, max_retries, timeout_seconds);
+
+            // Send packet_compressed_samples as JSON to the Flask server
+            CURL *curl = curl_easy_init();
+            if (curl) {
+                CURLcode res;
+                struct curl_slist *headers = nullptr;
+                headers = curl_slist_append(headers, "Content-Type: application/json");
+
+                curl_easy_setopt(curl, CURLOPT_URL, "http://192.168.1.3:5000/upload"); // adjust endpoint as needed
+                curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, packet_compressed_samples.c_str());
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, packet_compressed_samples.size());
+
+                res = curl_easy_perform(curl);
+                if (res != CURLE_OK) {
+                    std::cerr << "curl_easy_perform() failed: " << curl_easy_strerror(res) << std::endl;
+                } else {
+                    std::cout << "Packet sent to server successfully.\n";
+                }
+
+                curl_slist_free_all(headers);
+                curl_easy_cleanup(curl);
+            }
+        }
+
     }
 }
 

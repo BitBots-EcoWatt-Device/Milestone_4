@@ -92,6 +92,7 @@ std::vector<CompressionResult> compressBufferDelta(const std::vector<Sample>& sa
 
         // Verify
         auto valuesDecoded = deltaDecode(deltas);
+        res.compressed_value = deltas;
         res.verified = (values == valuesDecoded);
 
         results.push_back(res);
