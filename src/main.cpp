@@ -5,6 +5,7 @@
 #include <Ticker.h>
 
 #include "ESP8266Config.h"
+#include "user_config.h"
 #include "ESP8266Inverter.h"
 #include "ESP8266DataTypes.h"
 #include "ESP8266PollingConfig.h"
@@ -204,7 +205,7 @@ bool uploadToServer(const std::vector<Sample> &samples)
     HTTPClient httpClient;
     WiFiClient wifiClient;
 
-    httpClient.begin(wifiClient, "http://172.20.10.4:5001/upload"); // Update with your server
+    httpClient.begin(wifiClient, USER_CLOUD_UPLOAD_URL); // Cloud dashboard upload URL
     httpClient.addHeader("Content-Type", "application/json");
     httpClient.setTimeout(apiConfig.timeout_ms);
 
