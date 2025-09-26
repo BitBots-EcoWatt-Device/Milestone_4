@@ -33,6 +33,20 @@ void printSystemStatus();
 void handleSerialCommands();
 bool uploadToServer(const std::vector<Sample> &samples);
 
+// Flags set from timer callbacks (ISR context) to defer work to loop()
+volatile bool pollPending = false;
+volatile bool uploadPending = false;
+
+void IRAM_ATTR onPollTimer()
+{
+    pollPending = true;
+}
+
+void IRAM_ATTR onUploadTimer()
+{
+    uploadPending = true;
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -52,8 +66,9 @@ void setup()
 
         // Start polling and upload timers
         const DeviceConfig &deviceConfig = configManager.getDeviceConfig();
-        pollTicker.attach_ms(deviceConfig.poll_interval_ms, pollSensors);
-        uploadTicker.attach_ms(deviceConfig.upload_interval_ms, uploadData);
+    // Timer callbacks must be ISR-safe: set a flag and perform heavy work in loop()
+    pollTicker.attach_ms(deviceConfig.poll_interval_ms, onPollTimer);
+    uploadTicker.attach_ms(deviceConfig.upload_interval_ms, onUploadTimer);
 
         Serial.println("[MAIN] System initialized successfully");
         printSystemStatus();
@@ -81,6 +96,20 @@ void loop()
     lastLoopTime = currentTime;
 
     // Small delay to prevent watchdog reset
+    // Check for deferred tasks set by timers
+    if (pollPending)
+    {
+        // clear flag before executing to avoid missing new requests
+        pollPending = false;
+        pollSensors();
+    }
+
+    if (uploadPending)
+    {
+        uploadPending = false;
+        uploadData();
+    }
+
     delay(100);
 }
 
@@ -200,32 +229,53 @@ void uploadData()
 bool uploadToServer(const std::vector<Sample> &samples)
 {
     const APIConfig &apiConfig = configManager.getAPIConfig();
-
     HTTPClient httpClient;
     WiFiClient wifiClient;
 
-    httpClient.begin(wifiClient, "http://172.20.10.4:5001/upload"); // Cloud dashboard upload URL
+    // Use upload_url for cloud ingestion
+    const char *uploadUrl = apiConfig.upload_url[0] != '\0' ? apiConfig.upload_url : "http://10.63.73.102:5000/upload";
+    httpClient.begin(wifiClient, uploadUrl);
+    Serial.print("[HTTP] POST to: "); Serial.println(uploadUrl);
     httpClient.addHeader("Content-Type", "application/json");
     httpClient.setTimeout(apiConfig.timeout_ms);
 
-    // Create JSON payload
-    DynamicJsonDocument jsonDoc(4096); // Adjust size as needed
-    JsonArray samplesArray = jsonDoc.createNestedArray("samples");
+    // Build payload expected by Flask app.py
+    DynamicJsonDocument jsonDoc(4096);
+    jsonDoc["device_id"] = WiFi.hostname();
+    jsonDoc["timestamp"] = millis() - startTime;
 
-    for (const Sample &sample : samples)
+    JsonObject fieldsObj = jsonDoc.createNestedObject("fields");
+
+    // For each parameter, build a simple field report with a single-sample payload
+    for (ParameterType param : pollingConfig.getEnabledParameters())
     {
-        JsonObject sampleObj = samplesArray.createNestedObject();
-        sampleObj["timestamp"] = sample.timestamp;
+        if (samples.empty())
+            break;
 
-        JsonObject dataObj = sampleObj.createNestedObject("data");
-        for (ParameterType param : pollingConfig.getEnabledParameters())
-        {
-            if (sample.hasValue(param))
-            {
-                String paramName = parameterTypeToString(param);
-                dataObj[paramName] = sample.getValue(param);
-            }
-        }
+        const Sample &latest = samples.back();
+        if (!latest.hasValue(param))
+            continue;
+
+        String paramName = parameterTypeToString(param);
+        JsonObject field = fieldsObj.createNestedObject(paramName.c_str());
+        field["method"] = "Delta";
+        field["param_id"] = static_cast<int>(param);
+        field["n_samples"] = 1;
+
+        // bytes_len and cpu_time_ms are placeholders here
+        field["bytes_len"] = 0;
+        field["cpu_time_ms"] = 0.0;
+
+        // Scaling: Flask example expects voltage/current/frequency scaled by 1000 (e.g., 230.8 -> 230800)
+        float v = latest.getValue(param);
+        long scaled = 0;
+        if (param == ParameterType::AC_VOLTAGE || param == ParameterType::AC_CURRENT || param == ParameterType::AC_FREQUENCY)
+            scaled = (long)round(v * 1000.0f);
+        else
+            scaled = (long)round(v);
+
+        JsonArray payloadArr = field.createNestedArray("payload");
+        payloadArr.add(scaled);
     }
 
     String payload;
@@ -241,6 +291,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
         String response = httpClient.getString();
         Serial.print("[HTTP] Response code: ");
         Serial.println(httpResponseCode);
+        Serial.print("[HTTP] Response: ");
+        Serial.println(response);
 
         httpClient.end();
         return httpResponseCode == HTTP_CODE_OK;
