@@ -1,5 +1,4 @@
 #include "ESP8266Config.h"
-#include "user_config.h"
 
 ConfigManager configManager;
 
@@ -50,21 +49,21 @@ bool ConfigManager::saveConfig()
 void ConfigManager::loadDefaults()
 {
     // WiFi defaults
-    strcpy(config_.wifi.ssid, USER_WIFI_SSID);
-    strcpy(config_.wifi.password, USER_WIFI_PASSWORD);
-    strcpy(config_.wifi.hostname, USER_WIFI_HOSTNAME);
+    strcpy(config_.wifi.ssid, "YourWiFiSSID");
+    strcpy(config_.wifi.password, "YourWiFiPassword");
+    strcpy(config_.wifi.hostname, "bitbots-ecoWatt");
 
     // API defaults
-    strcpy(config_.api.api_key, USER_API_KEY);
-    strcpy(config_.api.read_url, USER_API_READ_URL);
-    strcpy(config_.api.write_url, USER_API_WRITE_URL);
-    config_.api.timeout_ms = USER_API_TIMEOUT_MS;
+    strcpy(config_.api.api_key, "NjhhZWIwNDU1ZDdmMzg3MzNiMTQ5YTFjOjY4YWViMDQ1NWQ3ZjM4NzMzYjE0OWExMg==");
+    strcpy(config_.api.read_url, "http://20.15.114.131:8080/api/inverter/read");
+    strcpy(config_.api.write_url,"http://20.15.114.131:8080/api/inverter/write");
+    config_.api.timeout_ms = 5000;
 
     // Device defaults
-    config_.device.slave_address = USER_SLAVE_ADDRESS;
-    config_.device.poll_interval_ms = USER_POLL_INTERVAL_MS;
-    config_.device.upload_interval_ms = USER_UPLOAD_INTERVAL_MS;
-    config_.device.buffer_size = USER_BUFFER_SIZE;
+    config_.device.slave_address = 0x11;
+    config_.device.poll_interval_ms = 5000;
+    config_.device.upload_interval_ms = 30000;
+    config_.device.buffer_size = 10;
 
     config_.magic = CONFIG_MAGIC;
 }
