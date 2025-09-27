@@ -309,7 +309,13 @@ bool uploadToServer(const std::vector<Sample> &samples)
     jsonDoc["window_end_ms"] = window_end;
     jsonDoc["poll_count"] = (int)samples.size();
 
-    // Helper to append a single parameter field into a doc
+    // Accumulators for a single-document (non-chunked) build
+    size_t totalOriginalBytes = 0;      // sum of 4 * n_samples per field
+    size_t totalCompressedBytes = 0;    // sum of varint-encoded bytes_len per field
+    float totalCpuMs = 0.0f;            // sum of cpu_time_ms per field
+    bool verifyAll = true;              // AND of per-field verify_ok
+
+    // Helper to append a single parameter field into a doc and accumulate totals
     auto appendParamField = [&](DynamicJsonDocument &doc, ParameterType param) {
         JsonObject fieldsObjLoc = doc["fields"].isNull() ? doc.createNestedObject("fields") : doc["fields"].as<JsonObject>();
 
@@ -353,8 +359,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
             }
         }
         unsigned long t1 = micros();
-        float cpu_ms = (t1 - t0) / 1000.0f;
-        size_t bytes_len = varintBytes.size();
+    float cpu_ms = (t1 - t0) / 1000.0f;
+    size_t bytes_len = varintBytes.size();
 
         String paramName = parameterTypeToString(param);
         JsonObject field = fieldsObjLoc.createNestedObject(paramName.c_str());
@@ -364,6 +370,7 @@ bool uploadToServer(const std::vector<Sample> &samples)
         field["bytes_len"] = (int)bytes_len;
         field["cpu_time_ms"] = cpu_ms;
         field["verify_ok"] = verify_ok;
+    field["original_bytes"] = (int)(4 * series.size());
 
         JsonObject agg = field.createNestedObject("agg");
         agg["min"] = (long)minV;
@@ -373,12 +380,24 @@ bool uploadToServer(const std::vector<Sample> &samples)
         JsonArray payloadArr = field.createNestedArray("payload");
         for (auto d : deltas) payloadArr.add((long)d);
         field["payload_varint_hex"] = Compression::hex_encode(varintBytes);
+
+        // Accumulate upload-level totals
+        totalOriginalBytes += (4 * series.size());
+        totalCompressedBytes += bytes_len;
+        totalCpuMs += cpu_ms;
+        verifyAll = verifyAll && verify_ok;
     };
 
     const auto enabledParams = pollingConfig.getEnabledParameters();
 
     // First, attempt to build a single-chunk payload and see if it fits
     for (ParameterType p : enabledParams) { appendParamField(jsonDoc, p); }
+
+    // Add upload-level metadata for original/compressed sizes and verification
+    jsonDoc["original_payload_size_bytes_total"] = (int)totalOriginalBytes;
+    jsonDoc["compressed_payload_size_bytes_total"] = (int)totalCompressedBytes;
+    jsonDoc["cpu_time_ms_total"] = totalCpuMs;
+    jsonDoc["verify_ok_all"] = verifyAll;
 
     const size_t PAYLOAD_THRESHOLD = 3500; // bytes; adjust if needed
 
@@ -470,6 +489,81 @@ bool uploadToServer(const std::vector<Sample> &samples)
         fieldList.push_back(f);
     }
 
+    // Helper to append a single parameter into a chunk doc and accumulate chunk-level totals only
+    auto appendParamFieldChunk = [&](DynamicJsonDocument &doc, ParameterType param,
+                                     size_t &chunkOriginalBytes, size_t &chunkCompressedBytes,
+                                     float &chunkCpuMs, bool &chunkVerifyAll) {
+        JsonObject fieldsObjLoc = doc["fields"].isNull() ? doc.createNestedObject("fields") : doc["fields"].as<JsonObject>();
+
+        // Collect scaled integer series for this parameter
+        std::vector<long> series;
+        series.reserve(samples.size());
+        for (const auto &s : samples)
+        {
+            if (!s.hasValue(param)) continue;
+            float v = s.getValue(param);
+            long scaled = 0;
+            if (param == ParameterType::AC_VOLTAGE || param == ParameterType::AC_CURRENT || param == ParameterType::AC_FREQUENCY)
+                scaled = (long)roundf(v * 1000.0f);
+            else
+                scaled = (long)roundf(v);
+            series.push_back(scaled);
+        }
+        if (series.empty()) return; // nothing to add
+
+        long minV = series[0], maxV = series[0];
+        long sum = 0;
+        for (long x : series) { if (x < minV) minV = x; if (x > maxV) maxV = x; sum += x; }
+        float avg = (float)sum / (float)series.size();
+
+        unsigned long t0 = micros();
+        std::vector<int32_t> deltas;
+        Compression::delta_compress(series, deltas);
+        std::vector<uint8_t> varintBytes;
+        Compression::encode_deltas_varint(deltas, varintBytes);
+        bool verify_ok = true;
+        {
+            std::vector<int32_t> deltas2;
+            if (!Compression::decode_deltas_varint(varintBytes, deltas2)) verify_ok = false;
+            else {
+                std::vector<long> recon;
+                Compression::delta_decompress(deltas2, recon);
+                if (recon.size() != series.size()) verify_ok = false;
+                else {
+                    for (size_t i = 0; i < recon.size(); ++i) { if (recon[i] != series[i]) { verify_ok = false; break; } }
+                }
+            }
+        }
+        unsigned long t1 = micros();
+        float cpu_ms = (t1 - t0) / 1000.0f;
+        size_t bytes_len = varintBytes.size();
+
+        String paramName = parameterTypeToString(param);
+        JsonObject field = fieldsObjLoc.createNestedObject(paramName.c_str());
+        field["method"] = "Delta";
+        field["param_id"] = static_cast<int>(param);
+        field["n_samples"] = (int)series.size();
+        field["bytes_len"] = (int)bytes_len;
+        field["cpu_time_ms"] = cpu_ms;
+        field["verify_ok"] = verify_ok;
+        field["original_bytes"] = (int)(4 * series.size());
+
+        JsonObject agg = field.createNestedObject("agg");
+        agg["min"] = (long)minV;
+        agg["avg"] = avg;
+        agg["max"] = (long)maxV;
+
+        JsonArray payloadArr = field.createNestedArray("payload");
+        for (auto d : deltas) payloadArr.add((long)d);
+        field["payload_varint_hex"] = Compression::hex_encode(varintBytes);
+
+        // Accumulate chunk-level totals only
+        chunkOriginalBytes += (4 * series.size());
+        chunkCompressedBytes += bytes_len;
+        chunkCpuMs += cpu_ms;
+        chunkVerifyAll = chunkVerifyAll && verify_ok;
+    };
+
     // Try sequentially packing fields until threshold is reached, send chunk, then continue
     size_t total = 0;
     {
@@ -520,10 +614,16 @@ bool uploadToServer(const std::vector<Sample> &samples)
         docChunk["chunk_total"] = (int)total;
         JsonObject fieldsObjC = docChunk.createNestedObject("fields");
 
+        // Chunk accumulators
+        size_t chunkOriginalBytes = 0;
+        size_t chunkCompressedBytes = 0;
+        float chunkCpuMs = 0.0f;
+        bool chunkVerifyAll = true;
+
         size_t startIdx = idx;
         for (; idx < fieldList.size(); ++idx)
         {
-            appendParamField(docChunk, fieldList[idx].param);
+            appendParamFieldChunk(docChunk, fieldList[idx].param, chunkOriginalBytes, chunkCompressedBytes, chunkCpuMs, chunkVerifyAll);
             String probe; serializeJson(docChunk, probe);
             if (probe.length() > PAYLOAD_THRESHOLD)
             {
@@ -531,10 +631,21 @@ bool uploadToServer(const std::vector<Sample> &samples)
                 docChunk.remove("fields");
                 fieldsObjC = docChunk.createNestedObject("fields");
                 for (size_t j = startIdx; j < idx; ++j)
-                    appendParamField(docChunk, fieldList[j].param);
+                    appendParamFieldChunk(docChunk, fieldList[j].param, chunkOriginalBytes, chunkCompressedBytes, chunkCpuMs, chunkVerifyAll);
                 break;
             }
         }
+
+        // Add window totals and chunk subtotals
+        docChunk["original_payload_size_bytes_total"] = (int)totalOriginalBytes;
+        docChunk["compressed_payload_size_bytes_total"] = (int)totalCompressedBytes;
+        docChunk["cpu_time_ms_total_window"] = totalCpuMs;
+        docChunk["verify_ok_all_window"] = verifyAll;
+
+        docChunk["original_payload_size_bytes_chunk"] = (int)chunkOriginalBytes;
+        docChunk["compressed_payload_size_bytes_chunk"] = (int)chunkCompressedBytes;
+        docChunk["cpu_time_ms_chunk"] = chunkCpuMs;
+        docChunk["verify_ok_all_chunk"] = chunkVerifyAll;
 
         bool ok = sendWithRetry(docChunk);
         if (!ok)
