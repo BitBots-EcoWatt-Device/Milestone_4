@@ -72,6 +72,9 @@ public:
     bool hasSpace() const { return buffer_.size() < capacity_; }
     void append(const Sample &sample);
     std::vector<Sample> flush();
+    // New: non-destructive snapshot; caller can clear() on success
+    std::vector<Sample> snapshot() const { return buffer_; }
+    void clear() { buffer_.clear(); }
     size_t size() const { return buffer_.size(); }
     bool empty() const { return buffer_.empty(); }
 

@@ -63,7 +63,7 @@ void ConfigManager::loadDefaults()
     // Device defaults
     config_.device.slave_address = 0x11;
     config_.device.poll_interval_ms = 5000;
-    config_.device.upload_interval_ms = 30000;
+    config_.device.upload_interval_ms = 15000;
     config_.device.buffer_size = 10;
 
     config_.magic = CONFIG_MAGIC;

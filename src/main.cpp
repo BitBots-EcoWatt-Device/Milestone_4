@@ -34,6 +34,22 @@ void printSystemStatus();
 void handleSerialCommands();
 bool uploadToServer(const std::vector<Sample> &samples);
 
+// Simple CRC32 (polynomial 0xEDB88320) for MAC stub
+static uint32_t crc32_calc(const uint8_t *data, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; ++i)
+    {
+        crc ^= data[i];
+        for (int j = 0; j < 8; ++j)
+        {
+            uint32_t mask = -(crc & 1u);
+            crc = (crc >> 1) ^ (0xEDB88320u & mask);
+        }
+    }
+    return ~crc;
+}
+
 // Flags set from timer callbacks (ISR context) to defer work to loop()
 volatile bool pollPending = false;
 volatile bool uploadPending = false;
@@ -172,11 +188,38 @@ void pollSensors()
         if (paramConfig.readFunction(inverter, value))
         {
             sample.setValue(paramType, value);
+            // Friendly name + unit with fallbacks
+            String friendlyName = paramConfig.name.length() ? paramConfig.name : parameterTypeToString(paramType);
+            String unit = paramConfig.unit;
+            if (unit.length() == 0)
+            {
+                switch (paramType)
+                {
+                case ParameterType::AC_VOLTAGE:
+                case ParameterType::PV1_VOLTAGE:
+                case ParameterType::PV2_VOLTAGE:
+                    unit = " V"; break;
+                case ParameterType::AC_CURRENT:
+                case ParameterType::PV1_CURRENT:
+                case ParameterType::PV2_CURRENT:
+                    unit = " A"; break;
+                case ParameterType::AC_FREQUENCY:
+                    unit = " Hz"; break;
+                case ParameterType::TEMPERATURE:
+                    unit = " °C"; break;
+                case ParameterType::OUTPUT_POWER:
+                    unit = " W"; break;
+                case ParameterType::EXPORT_POWER_PERCENT:
+                    unit = " %"; break;
+                default:
+                    unit = ""; break;
+                }
+            }
             Serial.print("[POLL] ");
-            Serial.print(paramConfig.name);
+            Serial.print(friendlyName);
             Serial.print(": ");
-            Serial.print(value);
-            Serial.println(paramConfig.unit);
+            Serial.print(value, 2);
+            Serial.println(unit);
         }
         else
         {
@@ -210,9 +253,18 @@ void uploadData()
         return;
     }
 
+    static bool uploadInProgress = false;
+    if (uploadInProgress)
+    {
+        Serial.println("[UPLOAD] Previous upload still in progress; skipping this tick");
+        return;
+    }
+    uploadInProgress = true;
+
     Serial.println("[UPLOAD] Starting data upload...");
 
-    auto samples = dataBuffer.flush();
+    // Non-destructive snapshot; clear only after ACK success
+    auto samples = dataBuffer.snapshot();
     Serial.print("[UPLOAD] Uploading ");
     Serial.print(samples.size());
     Serial.println(" samples");
@@ -220,11 +272,14 @@ void uploadData()
     if (uploadToServer(samples))
     {
         Serial.println("[UPLOAD] Upload successful");
+        dataBuffer.clear();
     }
     else
     {
         Serial.println("[UPLOAD] Upload failed");
     }
+
+    uploadInProgress = false;
 }
 
 bool uploadToServer(const std::vector<Sample> &samples)
@@ -242,15 +297,22 @@ bool uploadToServer(const std::vector<Sample> &samples)
 
     // Build payload expected by Flask app.py with compression + aggregation
     DynamicJsonDocument jsonDoc(8192);
+    // Session/window metadata
+    static uint32_t session_counter = 0;
+    // Derive window timing from first/last sample timestamps
+    uint32_t window_start = samples.empty() ? 0 : samples.front().timestamp;
+    uint32_t window_end = samples.empty() ? 0 : samples.back().timestamp;
     jsonDoc["device_id"] = WiFi.hostname();
-    jsonDoc["timestamp"] = millis() - startTime;
+    jsonDoc["timestamp"] = millis() - startTime; // client send time
+    jsonDoc["session_id"] = (uint32_t)(ESP.getChipId() ^ millis() ^ (++session_counter));
+    jsonDoc["window_start_ms"] = window_start;
+    jsonDoc["window_end_ms"] = window_end;
+    jsonDoc["poll_count"] = (int)samples.size();
 
-    JsonObject fieldsObj = jsonDoc.createNestedObject("fields");
+    // Helper to append a single parameter field into a doc
+    auto appendParamField = [&](DynamicJsonDocument &doc, ParameterType param) {
+        JsonObject fieldsObjLoc = doc["fields"].isNull() ? doc.createNestedObject("fields") : doc["fields"].as<JsonObject>();
 
-    // Build time-series per parameter across buffered samples
-    const auto enabledParams = pollingConfig.getEnabledParameters();
-    for (ParameterType param : enabledParams)
-    {
         // Collect scaled integer series for this parameter
         std::vector<long> series;
         series.reserve(samples.size());
@@ -265,99 +327,226 @@ bool uploadToServer(const std::vector<Sample> &samples)
                 scaled = (long)roundf(v);
             series.push_back(scaled);
         }
+        if (series.empty()) return; // nothing to add
 
-        if (series.empty())
-            continue;
-
-        // Aggregations on scaled ints
         long minV = series[0], maxV = series[0];
         long sum = 0;
         for (long x : series) { if (x < minV) minV = x; if (x > maxV) maxV = x; sum += x; }
         float avg = (float)sum / (float)series.size();
 
-        // Compress using delta encoding (send integer deltas for Flask compatibility)
         unsigned long t0 = micros();
         std::vector<int32_t> deltas;
         Compression::delta_compress(series, deltas);
-        // Also compute varint+zigzag encoded bytes (real compact form) for reporting
         std::vector<uint8_t> varintBytes;
         Compression::encode_deltas_varint(deltas, varintBytes);
-        // Optional self-verification: decode varints -> deltas -> samples and compare
         bool verify_ok = true;
         {
             std::vector<int32_t> deltas2;
-            if (!Compression::decode_deltas_varint(varintBytes, deltas2))
-            {
-                verify_ok = false;
-            }
-            else
-            {
+            if (!Compression::decode_deltas_varint(varintBytes, deltas2)) verify_ok = false;
+            else {
                 std::vector<long> recon;
                 Compression::delta_decompress(deltas2, recon);
                 if (recon.size() != series.size()) verify_ok = false;
-                else
-                {
-                    for (size_t i = 0; i < recon.size(); ++i)
-                    {
-                        if (recon[i] != series[i]) { verify_ok = false; break; }
-                    }
+                else {
+                    for (size_t i = 0; i < recon.size(); ++i) { if (recon[i] != series[i]) { verify_ok = false; break; } }
                 }
             }
         }
         unsigned long t1 = micros();
         float cpu_ms = (t1 - t0) / 1000.0f;
-        // Report the true compressed size using varint representation
         size_t bytes_len = varintBytes.size();
 
         String paramName = parameterTypeToString(param);
-        JsonObject field = fieldsObj.createNestedObject(paramName.c_str());
+        JsonObject field = fieldsObjLoc.createNestedObject(paramName.c_str());
         field["method"] = "Delta";
         field["param_id"] = static_cast<int>(param);
         field["n_samples"] = (int)series.size();
-    field["bytes_len"] = (int)bytes_len;
+        field["bytes_len"] = (int)bytes_len;
         field["cpu_time_ms"] = cpu_ms;
-    field["verify_ok"] = verify_ok;
+        field["verify_ok"] = verify_ok;
 
-        // Aggregates
         JsonObject agg = field.createNestedObject("agg");
         agg["min"] = (long)minV;
-        agg["avg"] = avg; // keep as float for readability
+        agg["avg"] = avg;
         agg["max"] = (long)maxV;
 
-        // Compressed payload (integer list of deltas for Flask display/decode)
         JsonArray payloadArr = field.createNestedArray("payload");
         for (auto d : deltas) payloadArr.add((long)d);
-
-        // Also include varint hex for actual compact transport (server may ignore)
         field["payload_varint_hex"] = Compression::hex_encode(varintBytes);
-    }
+    };
 
-    String payload;
-    serializeJson(jsonDoc, payload);
+    const auto enabledParams = pollingConfig.getEnabledParameters();
 
-    Serial.print("[HTTP] Payload size: ");
-    Serial.println(payload.length());
+    // First, attempt to build a single-chunk payload and see if it fits
+    for (ParameterType p : enabledParams) { appendParamField(jsonDoc, p); }
 
-    int httpResponseCode = httpClient.POST(payload);
+    const size_t PAYLOAD_THRESHOLD = 3500; // bytes; adjust if needed
 
-    if (httpResponseCode > 0)
-    {
-        String response = httpClient.getString();
-        Serial.print("[HTTP] Response code: ");
-        Serial.println(httpResponseCode);
-        Serial.print("[HTTP] Response: ");
-        Serial.println(response);
+    // Function to send a document with retry/backoff
+    auto sendWithRetry = [&](DynamicJsonDocument &doc) -> bool {
+        // Compute MAC over JSON without mac field
+        String tmp;
+        serializeJson(doc, tmp);
+        uint32_t macLocal = crc32_calc(reinterpret_cast<const uint8_t *>(tmp.c_str()), tmp.length());
+        doc["mac_crc32"] = macLocal;
+        tmp = String();
+        serializeJson(doc, tmp);
 
-        httpClient.end();
-        return httpResponseCode == HTTP_CODE_OK;
-    }
-    else
-    {
-        Serial.print("[HTTP] Error: ");
-        Serial.println(httpClient.errorToString(httpResponseCode));
-        httpClient.end();
+        Serial.print("[HTTP] Payload size: ");
+        Serial.println(tmp.length());
+
+        const int maxAttempts = 3;
+        int attemptLocal = 0;
+        while (attemptLocal < maxAttempts)
+        {
+            int code = httpClient.POST(tmp);
+            if (code > 0)
+            {
+                String response = httpClient.getString();
+                Serial.print("[HTTP] Response code: ");
+                Serial.println(code);
+                Serial.print("[HTTP] Response: ");
+                Serial.println(response);
+
+                if (code == HTTP_CODE_OK)
+                {
+                    StaticJsonDocument<1024> respDoc;
+                    if (deserializeJson(respDoc, response) == DeserializationError::Ok)
+                    {
+                        const char *status = respDoc["status"] | "";
+                        if (strcmp(status, "ok") == 0)
+                        {
+                            if (respDoc.containsKey("next_config"))
+                            {
+                                JsonObject cfg = respDoc["next_config"].as<JsonObject>();
+                                Serial.print("[HTTP] next_config: ");
+                                serializeJson(cfg, Serial);
+                                Serial.println();
+                            }
+                            return true;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                Serial.print("[HTTP] Error: ");
+                Serial.println(httpClient.errorToString(code));
+            }
+            ++attemptLocal;
+            if (attemptLocal < maxAttempts)
+            {
+                uint32_t backoffMs = (1u << (attemptLocal - 1)) * 1000u;
+                if (backoffMs > 4000u) backoffMs = 4000u;
+                Serial.print("[HTTP] Retry attempt ");
+                Serial.print(attemptLocal + 1);
+                Serial.print(" in ");
+                Serial.print(backoffMs);
+                Serial.println(" ms");
+                delay(backoffMs);
+            }
+        }
         return false;
+    };
+
+    // If the single doc is too large, chunk by fields
+    String firstPayload;
+    serializeJson(jsonDoc, firstPayload);
+    if (firstPayload.length() <= PAYLOAD_THRESHOLD)
+    {
+        bool ok = sendWithRetry(jsonDoc);
+        httpClient.end();
+        return ok;
     }
+
+    Serial.println("[UPLOAD] Payload exceeds threshold, chunking by fields");
+
+    // Build per-field chunks
+    struct FieldNameParam { String name; ParameterType param; };
+    std::vector<FieldNameParam> fieldList;
+    for (auto p : enabledParams)
+    {
+        FieldNameParam f{ parameterTypeToString(p), p };
+        fieldList.push_back(f);
+    }
+
+    // Try sequentially packing fields until threshold is reached, send chunk, then continue
+    size_t total = 0;
+    {
+        // compute total chunks by simulating packing
+        size_t countChunks = 0;
+        size_t idx = 0;
+        while (idx < fieldList.size())
+        {
+            DynamicJsonDocument docChunk(8192);
+            // copy session/window metadata
+            for (JsonPair kv : jsonDoc.as<JsonObject>())
+            {
+                if (String(kv.key().c_str()) == "fields") continue;
+                docChunk[kv.key().c_str()] = kv.value();
+            }
+            JsonObject fieldsObjC = docChunk.createNestedObject("fields");
+            size_t startIdx = idx;
+            for (; idx < fieldList.size(); ++idx)
+            {
+                appendParamField(docChunk, fieldList[idx].param);
+                String probe; serializeJson(docChunk, probe);
+                if (probe.length() > PAYLOAD_THRESHOLD)
+                {
+                    // remove the last addition by rebuilding chunk without it
+                    docChunk.remove("fields");
+                    fieldsObjC = docChunk.createNestedObject("fields");
+                    for (size_t j = startIdx; j < idx; ++j)
+                        appendParamField(docChunk, fieldList[j].param);
+                    break;
+                }
+            }
+            countChunks++;
+        }
+        total = countChunks;
+    }
+
+    size_t seq = 1;
+    size_t idx = 0;
+    while (idx < fieldList.size())
+    {
+        DynamicJsonDocument docChunk(8192);
+        for (JsonPair kv : jsonDoc.as<JsonObject>())
+        {
+            if (String(kv.key().c_str()) == "fields") continue;
+            docChunk[kv.key().c_str()] = kv.value();
+        }
+        docChunk["chunk_seq"] = (int)seq;
+        docChunk["chunk_total"] = (int)total;
+        JsonObject fieldsObjC = docChunk.createNestedObject("fields");
+
+        size_t startIdx = idx;
+        for (; idx < fieldList.size(); ++idx)
+        {
+            appendParamField(docChunk, fieldList[idx].param);
+            String probe; serializeJson(docChunk, probe);
+            if (probe.length() > PAYLOAD_THRESHOLD)
+            {
+                // rebuild without last
+                docChunk.remove("fields");
+                fieldsObjC = docChunk.createNestedObject("fields");
+                for (size_t j = startIdx; j < idx; ++j)
+                    appendParamField(docChunk, fieldList[j].param);
+                break;
+            }
+        }
+
+        bool ok = sendWithRetry(docChunk);
+        if (!ok)
+        {
+            httpClient.end();
+            return false;
+        }
+        ++seq;
+    }
+
+    httpClient.end();
+    return true;
 }
 
 void printSystemStatus()
