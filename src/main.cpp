@@ -8,6 +8,7 @@
 #include "ESP8266Inverter.h"
 #include "ESP8266DataTypes.h"
 #include "ESP8266PollingConfig.h"
+#include "ESP8266Compression.h"
 
 // Global objects
 ESP8266Inverter inverter;
@@ -239,43 +240,96 @@ bool uploadToServer(const std::vector<Sample> &samples)
     httpClient.addHeader("Content-Type", "application/json");
     httpClient.setTimeout(apiConfig.timeout_ms);
 
-    // Build payload expected by Flask app.py
-    DynamicJsonDocument jsonDoc(4096);
+    // Build payload expected by Flask app.py with compression + aggregation
+    DynamicJsonDocument jsonDoc(8192);
     jsonDoc["device_id"] = WiFi.hostname();
     jsonDoc["timestamp"] = millis() - startTime;
 
     JsonObject fieldsObj = jsonDoc.createNestedObject("fields");
 
-    // For each parameter, build a simple field report with a single-sample payload
-    for (ParameterType param : pollingConfig.getEnabledParameters())
+    // Build time-series per parameter across buffered samples
+    const auto enabledParams = pollingConfig.getEnabledParameters();
+    for (ParameterType param : enabledParams)
     {
-        if (samples.empty())
-            break;
+        // Collect scaled integer series for this parameter
+        std::vector<long> series;
+        series.reserve(samples.size());
+        for (const auto &s : samples)
+        {
+            if (!s.hasValue(param)) continue;
+            float v = s.getValue(param);
+            long scaled = 0;
+            if (param == ParameterType::AC_VOLTAGE || param == ParameterType::AC_CURRENT || param == ParameterType::AC_FREQUENCY)
+                scaled = (long)roundf(v * 1000.0f);
+            else
+                scaled = (long)roundf(v);
+            series.push_back(scaled);
+        }
 
-        const Sample &latest = samples.back();
-        if (!latest.hasValue(param))
+        if (series.empty())
             continue;
+
+        // Aggregations on scaled ints
+        long minV = series[0], maxV = series[0];
+        long sum = 0;
+        for (long x : series) { if (x < minV) minV = x; if (x > maxV) maxV = x; sum += x; }
+        float avg = (float)sum / (float)series.size();
+
+        // Compress using delta encoding (send integer deltas for Flask compatibility)
+        unsigned long t0 = micros();
+        std::vector<int32_t> deltas;
+        Compression::delta_compress(series, deltas);
+        // Also compute varint+zigzag encoded bytes (real compact form) for reporting
+        std::vector<uint8_t> varintBytes;
+        Compression::encode_deltas_varint(deltas, varintBytes);
+        // Optional self-verification: decode varints -> deltas -> samples and compare
+        bool verify_ok = true;
+        {
+            std::vector<int32_t> deltas2;
+            if (!Compression::decode_deltas_varint(varintBytes, deltas2))
+            {
+                verify_ok = false;
+            }
+            else
+            {
+                std::vector<long> recon;
+                Compression::delta_decompress(deltas2, recon);
+                if (recon.size() != series.size()) verify_ok = false;
+                else
+                {
+                    for (size_t i = 0; i < recon.size(); ++i)
+                    {
+                        if (recon[i] != series[i]) { verify_ok = false; break; }
+                    }
+                }
+            }
+        }
+        unsigned long t1 = micros();
+        float cpu_ms = (t1 - t0) / 1000.0f;
+        // Report the true compressed size using varint representation
+        size_t bytes_len = varintBytes.size();
 
         String paramName = parameterTypeToString(param);
         JsonObject field = fieldsObj.createNestedObject(paramName.c_str());
         field["method"] = "Delta";
         field["param_id"] = static_cast<int>(param);
-        field["n_samples"] = 1;
+        field["n_samples"] = (int)series.size();
+    field["bytes_len"] = (int)bytes_len;
+        field["cpu_time_ms"] = cpu_ms;
+    field["verify_ok"] = verify_ok;
 
-        // bytes_len and cpu_time_ms are placeholders here
-        field["bytes_len"] = 0;
-        field["cpu_time_ms"] = 0.0;
+        // Aggregates
+        JsonObject agg = field.createNestedObject("agg");
+        agg["min"] = (long)minV;
+        agg["avg"] = avg; // keep as float for readability
+        agg["max"] = (long)maxV;
 
-        // Scaling: Flask example expects voltage/current/frequency scaled by 1000 (e.g., 230.8 -> 230800)
-        float v = latest.getValue(param);
-        long scaled = 0;
-        if (param == ParameterType::AC_VOLTAGE || param == ParameterType::AC_CURRENT || param == ParameterType::AC_FREQUENCY)
-            scaled = (long)round(v * 1000.0f);
-        else
-            scaled = (long)round(v);
-
+        // Compressed payload (integer list of deltas for Flask display/decode)
         JsonArray payloadArr = field.createNestedArray("payload");
-        payloadArr.add(scaled);
+        for (auto d : deltas) payloadArr.add((long)d);
+
+        // Also include varint hex for actual compact transport (server may ignore)
+        field["payload_varint_hex"] = Compression::hex_encode(varintBytes);
     }
 
     String payload;
