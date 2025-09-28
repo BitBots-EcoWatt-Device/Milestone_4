@@ -49,20 +49,21 @@ bool ConfigManager::saveConfig()
 void ConfigManager::loadDefaults()
 {
     // WiFi defaults
-    strcpy(config_.wifi.ssid, "YourWiFiSSID");
-    strcpy(config_.wifi.password, "YourWiFiPassword");
+    strcpy(config_.wifi.ssid, "HONOR X9c");
+    strcpy(config_.wifi.password, "dinu1234");
     strcpy(config_.wifi.hostname, "bitbots-ecoWatt");
 
     // API defaults
     strcpy(config_.api.api_key, "NjhhZWIwNDU1ZDdmMzg3MzNiMTQ5YTFjOjY4YWViMDQ1NWQ3ZjM4NzMzYjE0OWExMg==");
     strcpy(config_.api.read_url, "http://20.15.114.131:8080/api/inverter/read");
     strcpy(config_.api.write_url,"http://20.15.114.131:8080/api/inverter/write");
+    strcpy(config_.api.upload_url,"http://10.178.162.228:5000/upload");
     config_.api.timeout_ms = 5000;
 
     // Device defaults
     config_.device.slave_address = 0x11;
     config_.device.poll_interval_ms = 5000;
-    config_.device.upload_interval_ms = 30000;
+    config_.device.upload_interval_ms = 15000;
     config_.device.buffer_size = 10;
 
     config_.magic = CONFIG_MAGIC;
@@ -79,15 +80,20 @@ void ConfigManager::setWiFiConfig(const char *ssid, const char *password, const 
     config_.wifi.hostname[sizeof(config_.wifi.hostname) - 1] = '\0';
 }
 
-void ConfigManager::setAPIConfig(const char *api_key, const char *read_url, const char *write_url, uint16_t timeout_ms)
+void ConfigManager::setAPIConfig(const char *api_key, const char *read_url, const char *write_url, const char *upload_url, uint16_t timeout_ms)
 {
     strncpy(config_.api.api_key, api_key, sizeof(config_.api.api_key) - 1);
     strncpy(config_.api.read_url, read_url, sizeof(config_.api.read_url) - 1);
     strncpy(config_.api.write_url, write_url, sizeof(config_.api.write_url) - 1);
+    if (upload_url)
+        strncpy(config_.api.upload_url, upload_url, sizeof(config_.api.upload_url) - 1);
+    else
+        config_.api.upload_url[0] = '\0';
 
     config_.api.api_key[sizeof(config_.api.api_key) - 1] = '\0';
     config_.api.read_url[sizeof(config_.api.read_url) - 1] = '\0';
     config_.api.write_url[sizeof(config_.api.write_url) - 1] = '\0';
+    config_.api.upload_url[sizeof(config_.api.upload_url) - 1] = '\0';
     config_.api.timeout_ms = timeout_ms;
 }
 
