@@ -13,6 +13,12 @@ public:
 
     bool begin();
 
+    // Set the Modbus slave address from configuration
+    void setSlaveAddress(uint8_t slaveAddr);
+
+    // New unified read method using parameter descriptor table
+    bool read(ParameterType id, float &out);
+
     // New unified read method using parameter descriptor table
     bool read(ParameterType id, float &out);
 
@@ -41,9 +47,9 @@ public:
 
 private:
     ESP8266ModbusHandler modbusHandler_;
+    uint8_t slaveAddress_;
 
     // Device-specific constants - Register addresses
-    static const uint8_t SLAVE_ADDRESS = 0x11;
     static const uint16_t REG_AC_VOLTAGE = 0;           // Vac1/L1 Phase voltage (gain: 10, unit: V)
     static const uint16_t REG_AC_CURRENT = 1;           // Iac1/L1 Phase current (gain: 10, unit: A)
     static const uint16_t REG_AC_FREQUENCY = 2;         // Fac1/L1 Phase frequency (gain: 100, unit: Hz)

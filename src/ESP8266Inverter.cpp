@@ -1,13 +1,18 @@
 #include "ESP8266Inverter.h"
 #include "ESP8266Parameters.h"
 
-ESP8266Inverter::ESP8266Inverter()
+ESP8266Inverter::ESP8266Inverter() : slaveAddress_(0x11)
 {
 }
 
 bool ESP8266Inverter::begin()
 {
     return modbusHandler_.begin();
+}
+
+void ESP8266Inverter::setSlaveAddress(uint8_t slaveAddr)
+{
+    slaveAddress_ = slaveAddr;
 }
 
 bool ESP8266Inverter::read(ParameterType id, float &out)
@@ -95,7 +100,7 @@ bool ESP8266Inverter::getOutputPower(int &power)
 bool ESP8266Inverter::getACMeasurements(float &voltage, float &current, float &frequency)
 {
     std::vector<uint16_t> values;
-    if (modbusHandler_.readRegisters(REG_AC_VOLTAGE, 3, values, SLAVE_ADDRESS) && values.size() >= 3)
+    if (modbusHandler_.readRegisters(REG_AC_VOLTAGE, 3, values, slaveAddress_) && values.size() >= 3)
     {
         voltage = values[0] / 10.0f;
         current = values[1] / 10.0f;
@@ -108,7 +113,7 @@ bool ESP8266Inverter::getACMeasurements(float &voltage, float &current, float &f
 bool ESP8266Inverter::getPVMeasurements(float &pv1Voltage, float &pv2Voltage, float &pv1Current, float &pv2Current)
 {
     std::vector<uint16_t> values;
-    if (modbusHandler_.readRegisters(REG_PV1_VOLTAGE, 4, values, SLAVE_ADDRESS) && values.size() >= 4)
+    if (modbusHandler_.readRegisters(REG_PV1_VOLTAGE, 4, values, slaveAddress_) && values.size() >= 4)
     {
         pv1Voltage = values[0] / 10.0f;
         pv2Voltage = values[1] / 10.0f;
@@ -122,7 +127,7 @@ bool ESP8266Inverter::getPVMeasurements(float &pv1Voltage, float &pv2Voltage, fl
 bool ESP8266Inverter::getSystemStatus(float &temperature, int &exportPercent, int &outputPower)
 {
     std::vector<uint16_t> values;
-    if (modbusHandler_.readRegisters(REG_TEMPERATURE, 3, values, SLAVE_ADDRESS) && values.size() >= 3)
+    if (modbusHandler_.readRegisters(REG_TEMPERATURE, 3, values, slaveAddress_) && values.size() >= 3)
     {
         temperature = values[0] / 10.0f;
         exportPercent = values[1];
@@ -140,7 +145,7 @@ bool ESP8266Inverter::setExportPowerPercent(int value)
 bool ESP8266Inverter::readSingleRegister(uint16_t regAddr, uint16_t &value)
 {
     std::vector<uint16_t> values;
-    if (modbusHandler_.readRegisters(regAddr, 1, values, SLAVE_ADDRESS) && !values.empty())
+    if (modbusHandler_.readRegisters(regAddr, 1, values, slaveAddress_) && !values.empty())
     {
         value = values[0];
         return true;
@@ -150,5 +155,5 @@ bool ESP8266Inverter::readSingleRegister(uint16_t regAddr, uint16_t &value)
 
 bool ESP8266Inverter::writeSingleRegister(uint16_t regAddr, uint16_t value)
 {
-    return modbusHandler_.writeRegister(regAddr, value, SLAVE_ADDRESS);
+    return modbusHandler_.writeRegister(regAddr, value, slaveAddress_);
 }

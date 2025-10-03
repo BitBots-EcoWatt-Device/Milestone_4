@@ -140,6 +140,12 @@ bool initializeSystem()
         Serial.println("[INIT] Failed to load configuration, using defaults");
     }
 
+    // Configure inverter with slave address from configuration
+    const DeviceConfig &deviceConfig = configManager.getDeviceConfig();
+    inverter.setSlaveAddress(deviceConfig.slave_address);
+    Serial.print("[INIT] Inverter slave address set to: 0x");
+    Serial.println(deviceConfig.slave_address, HEX);
+
     // Initialize inverter communication
     if (!inverter.begin())
     {
