@@ -15,32 +15,15 @@ public:
     void setParameters(const std::vector<ParameterType> &params);
     const std::vector<ParameterType> &getEnabledParameters() const { return enabledParameters_; }
 
-    const ParameterConfig &getParameterConfig(ParameterType param) const;
-    void printEnabledParameters() const;
+    // Get parameter name and unit from descriptor table
+    String getParameterName(ParameterType param) const;
+    String getParameterUnit(ParameterType param) const;
 
+    void printEnabledParameters() const;
     bool isParameterEnabled(ParameterType param) const;
 
 private:
     std::vector<ParameterType> enabledParameters_;
-    void initializeParameterConfigs();
-
-    static ParameterConfig parameterConfigs_[10]; // Static array for all parameter configs
-    static bool configsInitialized_;
 };
-
-// Helper functions for parameter reading
-namespace ParameterReaders
-{
-    bool readACVoltage(ESP8266Inverter &inverter, float &value);
-    bool readACCurrent(ESP8266Inverter &inverter, float &value);
-    bool readACFrequency(ESP8266Inverter &inverter, float &value);
-    bool readPV1Voltage(ESP8266Inverter &inverter, float &value);
-    bool readPV2Voltage(ESP8266Inverter &inverter, float &value);
-    bool readPV1Current(ESP8266Inverter &inverter, float &value);
-    bool readPV2Current(ESP8266Inverter &inverter, float &value);
-    bool readTemperature(ESP8266Inverter &inverter, float &value);
-    bool readExportPowerPercent(ESP8266Inverter &inverter, float &value);
-    bool readOutputPower(ESP8266Inverter &inverter, float &value);
-}
 
 #endif // ESP8266_POLLING_CONFIG_H

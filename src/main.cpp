@@ -83,9 +83,9 @@ void setup()
 
         // Start polling and upload timers
         const DeviceConfig &deviceConfig = configManager.getDeviceConfig();
-    // Timer callbacks must be ISR-safe: set a flag and perform heavy work in loop()
-    pollTicker.attach_ms(deviceConfig.poll_interval_ms, onPollTimer);
-    uploadTicker.attach_ms(deviceConfig.upload_interval_ms, onUploadTimer);
+        // Timer callbacks must be ISR-safe: set a flag and perform heavy work in loop()
+        pollTicker.attach_ms(deviceConfig.poll_interval_ms, onPollTimer);
+        uploadTicker.attach_ms(deviceConfig.upload_interval_ms, onUploadTimer);
 
         Serial.println("[MAIN] System initialized successfully");
         printSystemStatus();
@@ -182,15 +182,20 @@ void pollSensors()
 
     for (ParameterType paramType : enabledParams)
     {
-        const ParameterConfig &paramConfig = pollingConfig.getParameterConfig(paramType);
         float value;
 
-        if (paramConfig.readFunction(inverter, value))
+        if (inverter.read(paramType, value))
         {
             sample.setValue(paramType, value);
-            // Friendly name + unit with fallbacks
-            String friendlyName = paramConfig.name.length() ? paramConfig.name : parameterTypeToString(paramType);
-            String unit = paramConfig.unit;
+            // Get name and unit from parameter descriptor table
+            String friendlyName = pollingConfig.getParameterName(paramType);
+            String unit = pollingConfig.getParameterUnit(paramType);
+
+            // Fallback to default conversion if name/unit not found
+            if (friendlyName.length() == 0)
+            {
+                friendlyName = parameterTypeToString(paramType);
+            }
             if (unit.length() == 0)
             {
                 switch (paramType)
@@ -198,21 +203,28 @@ void pollSensors()
                 case ParameterType::AC_VOLTAGE:
                 case ParameterType::PV1_VOLTAGE:
                 case ParameterType::PV2_VOLTAGE:
-                    unit = " V"; break;
+                    unit = " V";
+                    break;
                 case ParameterType::AC_CURRENT:
                 case ParameterType::PV1_CURRENT:
                 case ParameterType::PV2_CURRENT:
-                    unit = " A"; break;
+                    unit = " A";
+                    break;
                 case ParameterType::AC_FREQUENCY:
-                    unit = " Hz"; break;
+                    unit = " Hz";
+                    break;
                 case ParameterType::TEMPERATURE:
-                    unit = " °C"; break;
+                    unit = " °C";
+                    break;
                 case ParameterType::OUTPUT_POWER:
-                    unit = " W"; break;
+                    unit = " W";
+                    break;
                 case ParameterType::EXPORT_POWER_PERCENT:
-                    unit = " %"; break;
+                    unit = " %";
+                    break;
                 default:
-                    unit = ""; break;
+                    unit = "";
+                    break;
                 }
             }
             Serial.print("[POLL] ");
@@ -224,7 +236,15 @@ void pollSensors()
         else
         {
             Serial.print("[POLL] Failed to read ");
-            Serial.println(paramConfig.name);
+            String paramName = pollingConfig.getParameterName(paramType);
+            if (paramName.length() > 0)
+            {
+                Serial.println(paramName);
+            }
+            else
+            {
+                Serial.println(parameterTypeToString(paramType));
+            }
             allSuccess = false;
         }
     }
@@ -291,7 +311,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
     // Use upload_url for cloud ingestion
     const char *uploadUrl = apiConfig.upload_url[0] != '\0' ? apiConfig.upload_url : "http://10.63.73.102:5000/upload";
     httpClient.begin(wifiClient, uploadUrl);
-    Serial.print("[HTTP] POST to: "); Serial.println(uploadUrl);
+    Serial.print("[HTTP] POST to: ");
+    Serial.println(uploadUrl);
     httpClient.addHeader("Content-Type", "application/json");
     httpClient.setTimeout(apiConfig.timeout_ms);
 
@@ -310,13 +331,14 @@ bool uploadToServer(const std::vector<Sample> &samples)
     jsonDoc["poll_count"] = (int)samples.size();
 
     // Accumulators for a single-document (non-chunked) build
-    size_t totalOriginalBytes = 0;      // sum of 4 * n_samples per field
-    size_t totalCompressedBytes = 0;    // sum of varint-encoded bytes_len per field
-    float totalCpuMs = 0.0f;            // sum of cpu_time_ms per field
-    bool verifyAll = true;              // AND of per-field verify_ok
+    size_t totalOriginalBytes = 0;   // sum of 4 * n_samples per field
+    size_t totalCompressedBytes = 0; // sum of varint-encoded bytes_len per field
+    float totalCpuMs = 0.0f;         // sum of cpu_time_ms per field
+    bool verifyAll = true;           // AND of per-field verify_ok
 
     // Helper to append a single parameter field into a doc and accumulate totals
-    auto appendParamField = [&](DynamicJsonDocument &doc, ParameterType param) {
+    auto appendParamField = [&](DynamicJsonDocument &doc, ParameterType param)
+    {
         JsonObject fieldsObjLoc = doc["fields"].isNull() ? doc.createNestedObject("fields") : doc["fields"].as<JsonObject>();
 
         // Collect scaled integer series for this parameter
@@ -324,7 +346,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
         series.reserve(samples.size());
         for (const auto &s : samples)
         {
-            if (!s.hasValue(param)) continue;
+            if (!s.hasValue(param))
+                continue;
             float v = s.getValue(param);
             long scaled = 0;
             if (param == ParameterType::AC_VOLTAGE || param == ParameterType::AC_CURRENT || param == ParameterType::AC_FREQUENCY)
@@ -333,11 +356,19 @@ bool uploadToServer(const std::vector<Sample> &samples)
                 scaled = (long)roundf(v);
             series.push_back(scaled);
         }
-        if (series.empty()) return; // nothing to add
+        if (series.empty())
+            return; // nothing to add
 
         long minV = series[0], maxV = series[0];
         long sum = 0;
-        for (long x : series) { if (x < minV) minV = x; if (x > maxV) maxV = x; sum += x; }
+        for (long x : series)
+        {
+            if (x < minV)
+                minV = x;
+            if (x > maxV)
+                maxV = x;
+            sum += x;
+        }
         float avg = (float)sum / (float)series.size();
 
         unsigned long t0 = micros();
@@ -348,19 +379,30 @@ bool uploadToServer(const std::vector<Sample> &samples)
         bool verify_ok = true;
         {
             std::vector<int32_t> deltas2;
-            if (!Compression::decode_deltas_varint(varintBytes, deltas2)) verify_ok = false;
-            else {
+            if (!Compression::decode_deltas_varint(varintBytes, deltas2))
+                verify_ok = false;
+            else
+            {
                 std::vector<long> recon;
                 Compression::delta_decompress(deltas2, recon);
-                if (recon.size() != series.size()) verify_ok = false;
-                else {
-                    for (size_t i = 0; i < recon.size(); ++i) { if (recon[i] != series[i]) { verify_ok = false; break; } }
+                if (recon.size() != series.size())
+                    verify_ok = false;
+                else
+                {
+                    for (size_t i = 0; i < recon.size(); ++i)
+                    {
+                        if (recon[i] != series[i])
+                        {
+                            verify_ok = false;
+                            break;
+                        }
+                    }
                 }
             }
         }
         unsigned long t1 = micros();
-    float cpu_ms = (t1 - t0) / 1000.0f;
-    size_t bytes_len = varintBytes.size();
+        float cpu_ms = (t1 - t0) / 1000.0f;
+        size_t bytes_len = varintBytes.size();
 
         String paramName = parameterTypeToString(param);
         JsonObject field = fieldsObjLoc.createNestedObject(paramName.c_str());
@@ -370,7 +412,7 @@ bool uploadToServer(const std::vector<Sample> &samples)
         field["bytes_len"] = (int)bytes_len;
         field["cpu_time_ms"] = cpu_ms;
         field["verify_ok"] = verify_ok;
-    field["original_bytes"] = (int)(4 * series.size());
+        field["original_bytes"] = (int)(4 * series.size());
 
         JsonObject agg = field.createNestedObject("agg");
         agg["min"] = (long)minV;
@@ -378,7 +420,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
         agg["max"] = (long)maxV;
 
         JsonArray payloadArr = field.createNestedArray("payload");
-        for (auto d : deltas) payloadArr.add((long)d);
+        for (auto d : deltas)
+            payloadArr.add((long)d);
         field["payload_varint_hex"] = Compression::hex_encode(varintBytes);
 
         // Accumulate upload-level totals
@@ -391,7 +434,10 @@ bool uploadToServer(const std::vector<Sample> &samples)
     const auto enabledParams = pollingConfig.getEnabledParameters();
 
     // First, attempt to build a single-chunk payload and see if it fits
-    for (ParameterType p : enabledParams) { appendParamField(jsonDoc, p); }
+    for (ParameterType p : enabledParams)
+    {
+        appendParamField(jsonDoc, p);
+    }
 
     // Add upload-level metadata for original/compressed sizes and verification
     jsonDoc["original_payload_size_bytes_total"] = (int)totalOriginalBytes;
@@ -402,7 +448,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
     const size_t PAYLOAD_THRESHOLD = 3500; // bytes; adjust if needed
 
     // Function to send a document with retry/backoff
-    auto sendWithRetry = [&](DynamicJsonDocument &doc) -> bool {
+    auto sendWithRetry = [&](DynamicJsonDocument &doc) -> bool
+    {
         // Compute MAC over JSON without mac field
         String tmp;
         serializeJson(doc, tmp);
@@ -456,7 +503,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
             if (attemptLocal < maxAttempts)
             {
                 uint32_t backoffMs = (1u << (attemptLocal - 1)) * 1000u;
-                if (backoffMs > 4000u) backoffMs = 4000u;
+                if (backoffMs > 4000u)
+                    backoffMs = 4000u;
                 Serial.print("[HTTP] Retry attempt ");
                 Serial.print(attemptLocal + 1);
                 Serial.print(" in ");
@@ -481,18 +529,23 @@ bool uploadToServer(const std::vector<Sample> &samples)
     Serial.println("[UPLOAD] Payload exceeds threshold, chunking by fields");
 
     // Build per-field chunks
-    struct FieldNameParam { String name; ParameterType param; };
+    struct FieldNameParam
+    {
+        String name;
+        ParameterType param;
+    };
     std::vector<FieldNameParam> fieldList;
     for (auto p : enabledParams)
     {
-        FieldNameParam f{ parameterTypeToString(p), p };
+        FieldNameParam f{parameterTypeToString(p), p};
         fieldList.push_back(f);
     }
 
     // Helper to append a single parameter into a chunk doc and accumulate chunk-level totals only
     auto appendParamFieldChunk = [&](DynamicJsonDocument &doc, ParameterType param,
                                      size_t &chunkOriginalBytes, size_t &chunkCompressedBytes,
-                                     float &chunkCpuMs, bool &chunkVerifyAll) {
+                                     float &chunkCpuMs, bool &chunkVerifyAll)
+    {
         JsonObject fieldsObjLoc = doc["fields"].isNull() ? doc.createNestedObject("fields") : doc["fields"].as<JsonObject>();
 
         // Collect scaled integer series for this parameter
@@ -500,7 +553,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
         series.reserve(samples.size());
         for (const auto &s : samples)
         {
-            if (!s.hasValue(param)) continue;
+            if (!s.hasValue(param))
+                continue;
             float v = s.getValue(param);
             long scaled = 0;
             if (param == ParameterType::AC_VOLTAGE || param == ParameterType::AC_CURRENT || param == ParameterType::AC_FREQUENCY)
@@ -509,11 +563,19 @@ bool uploadToServer(const std::vector<Sample> &samples)
                 scaled = (long)roundf(v);
             series.push_back(scaled);
         }
-        if (series.empty()) return; // nothing to add
+        if (series.empty())
+            return; // nothing to add
 
         long minV = series[0], maxV = series[0];
         long sum = 0;
-        for (long x : series) { if (x < minV) minV = x; if (x > maxV) maxV = x; sum += x; }
+        for (long x : series)
+        {
+            if (x < minV)
+                minV = x;
+            if (x > maxV)
+                maxV = x;
+            sum += x;
+        }
         float avg = (float)sum / (float)series.size();
 
         unsigned long t0 = micros();
@@ -524,13 +586,24 @@ bool uploadToServer(const std::vector<Sample> &samples)
         bool verify_ok = true;
         {
             std::vector<int32_t> deltas2;
-            if (!Compression::decode_deltas_varint(varintBytes, deltas2)) verify_ok = false;
-            else {
+            if (!Compression::decode_deltas_varint(varintBytes, deltas2))
+                verify_ok = false;
+            else
+            {
                 std::vector<long> recon;
                 Compression::delta_decompress(deltas2, recon);
-                if (recon.size() != series.size()) verify_ok = false;
-                else {
-                    for (size_t i = 0; i < recon.size(); ++i) { if (recon[i] != series[i]) { verify_ok = false; break; } }
+                if (recon.size() != series.size())
+                    verify_ok = false;
+                else
+                {
+                    for (size_t i = 0; i < recon.size(); ++i)
+                    {
+                        if (recon[i] != series[i])
+                        {
+                            verify_ok = false;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -554,7 +627,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
         agg["max"] = (long)maxV;
 
         JsonArray payloadArr = field.createNestedArray("payload");
-        for (auto d : deltas) payloadArr.add((long)d);
+        for (auto d : deltas)
+            payloadArr.add((long)d);
         field["payload_varint_hex"] = Compression::hex_encode(varintBytes);
 
         // Accumulate chunk-level totals only
@@ -576,7 +650,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
             // copy session/window metadata
             for (JsonPair kv : jsonDoc.as<JsonObject>())
             {
-                if (String(kv.key().c_str()) == "fields") continue;
+                if (String(kv.key().c_str()) == "fields")
+                    continue;
                 docChunk[kv.key().c_str()] = kv.value();
             }
             JsonObject fieldsObjC = docChunk.createNestedObject("fields");
@@ -584,7 +659,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
             for (; idx < fieldList.size(); ++idx)
             {
                 appendParamField(docChunk, fieldList[idx].param);
-                String probe; serializeJson(docChunk, probe);
+                String probe;
+                serializeJson(docChunk, probe);
                 if (probe.length() > PAYLOAD_THRESHOLD)
                 {
                     // remove the last addition by rebuilding chunk without it
@@ -607,7 +683,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
         DynamicJsonDocument docChunk(8192);
         for (JsonPair kv : jsonDoc.as<JsonObject>())
         {
-            if (String(kv.key().c_str()) == "fields") continue;
+            if (String(kv.key().c_str()) == "fields")
+                continue;
             docChunk[kv.key().c_str()] = kv.value();
         }
         docChunk["chunk_seq"] = (int)seq;
@@ -624,7 +701,8 @@ bool uploadToServer(const std::vector<Sample> &samples)
         for (; idx < fieldList.size(); ++idx)
         {
             appendParamFieldChunk(docChunk, fieldList[idx].param, chunkOriginalBytes, chunkCompressedBytes, chunkCpuMs, chunkVerifyAll);
-            String probe; serializeJson(docChunk, probe);
+            String probe;
+            serializeJson(docChunk, probe);
             if (probe.length() > PAYLOAD_THRESHOLD)
             {
                 // rebuild without last

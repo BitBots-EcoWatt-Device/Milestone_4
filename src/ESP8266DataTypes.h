@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include <vector>
 
-enum class ParameterType
+enum class ParameterType : uint8_t
 {
     AC_VOLTAGE = 0,
     AC_CURRENT = 1,
@@ -22,7 +22,6 @@ struct ParameterConfig
 {
     String name;
     String unit;
-    bool (*readFunction)(class ESP8266Inverter &, float &);
 };
 
 struct Sample

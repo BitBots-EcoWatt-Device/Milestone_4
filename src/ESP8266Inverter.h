@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include "ESP8266ModbusHandler.h"
+#include "ESP8266DataTypes.h"
 #include <vector>
 
 class ESP8266Inverter
@@ -12,7 +13,10 @@ public:
 
     bool begin();
 
-    // Individual register read operations
+    // New unified read method using parameter descriptor table
+    bool read(ParameterType id, float &out);
+
+    // Individual register read operations (legacy, now thin wrappers)
     bool getACVoltage(float &voltage);              // Register 0: Vac1/L1 Phase voltage
     bool getACCurrent(float &current);              // Register 1: Iac1/L1 Phase current
     bool getACFrequency(float &frequency);          // Register 2: Fac1/L1 Phase frequency

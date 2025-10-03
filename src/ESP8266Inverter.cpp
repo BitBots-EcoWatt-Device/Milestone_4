@@ -1,4 +1,5 @@
 #include "ESP8266Inverter.h"
+#include "ESP8266Parameters.h"
 
 ESP8266Inverter::ESP8266Inverter()
 {
@@ -9,100 +10,72 @@ bool ESP8266Inverter::begin()
     return modbusHandler_.begin();
 }
 
-bool ESP8266Inverter::getACVoltage(float &voltage)
+bool ESP8266Inverter::read(ParameterType id, float &out)
 {
-    uint16_t value;
-    if (readSingleRegister(REG_AC_VOLTAGE, value))
+    const ParamDesc *param = find_param(id);
+    if (!param)
     {
-        voltage = value / 10.0f;
+        return false;
+    }
+
+    uint16_t reg_addr = pgm_read_word(&param->reg);
+    float scale = pgm_read_float(&param->scale);
+
+    uint16_t raw_value;
+    if (readSingleRegister(reg_addr, raw_value))
+    {
+        out = raw_value / scale;
         return true;
     }
     return false;
+}
+
+bool ESP8266Inverter::getACVoltage(float &voltage)
+{
+    return read(ParameterType::AC_VOLTAGE, voltage);
 }
 
 bool ESP8266Inverter::getACCurrent(float &current)
 {
-    uint16_t value;
-    if (readSingleRegister(REG_AC_CURRENT, value))
-    {
-        current = value / 10.0f;
-        return true;
-    }
-    return false;
+    return read(ParameterType::AC_CURRENT, current);
 }
 
 bool ESP8266Inverter::getACFrequency(float &frequency)
 {
-    uint16_t value;
-    if (readSingleRegister(REG_AC_FREQUENCY, value))
-    {
-        frequency = value / 100.0f;
-        return true;
-    }
-    return false;
+    return read(ParameterType::AC_FREQUENCY, frequency);
 }
 
 bool ESP8266Inverter::getPV1Voltage(float &voltage)
 {
-    uint16_t value;
-    if (readSingleRegister(REG_PV1_VOLTAGE, value))
-    {
-        voltage = value / 10.0f;
-        return true;
-    }
-    return false;
+    return read(ParameterType::PV1_VOLTAGE, voltage);
 }
 
 bool ESP8266Inverter::getPV2Voltage(float &voltage)
 {
-    uint16_t value;
-    if (readSingleRegister(REG_PV2_VOLTAGE, value))
-    {
-        voltage = value / 10.0f;
-        return true;
-    }
-    return false;
+    return read(ParameterType::PV2_VOLTAGE, voltage);
 }
 
 bool ESP8266Inverter::getPV1Current(float &current)
 {
-    uint16_t value;
-    if (readSingleRegister(REG_PV1_CURRENT, value))
-    {
-        current = value / 10.0f;
-        return true;
-    }
-    return false;
+    return read(ParameterType::PV1_CURRENT, current);
 }
 
 bool ESP8266Inverter::getPV2Current(float &current)
 {
-    uint16_t value;
-    if (readSingleRegister(REG_PV2_CURRENT, value))
-    {
-        current = value / 10.0f;
-        return true;
-    }
-    return false;
+    return read(ParameterType::PV2_CURRENT, current);
 }
 
 bool ESP8266Inverter::getTemperature(float &temperature)
 {
-    uint16_t value;
-    if (readSingleRegister(REG_TEMPERATURE, value))
-    {
-        temperature = value / 10.0f;
-        return true;
-    }
-    return false;
+    return read(ParameterType::TEMPERATURE, temperature);
 }
 
 bool ESP8266Inverter::getExportPowerPercent(int &exportPercent)
 {
-    uint16_t value;
-    if (readSingleRegister(REG_EXPORT_POWER_PERCENT, value))
+    float value;
+    if (read(ParameterType::EXPORT_POWER_PERCENT, value))
     {
-        exportPercent = value;
+        exportPercent = static_cast<int>(value);
         return true;
     }
     return false;
@@ -110,10 +83,10 @@ bool ESP8266Inverter::getExportPowerPercent(int &exportPercent)
 
 bool ESP8266Inverter::getOutputPower(int &power)
 {
-    uint16_t value;
-    if (readSingleRegister(REG_OUTPUT_POWER, value))
+    float value;
+    if (read(ParameterType::OUTPUT_POWER, value))
     {
-        power = value;
+        power = static_cast<int>(value);
         return true;
     }
     return false;

@@ -105,6 +105,60 @@ The ESP8266 has limited RAM (~80KB available). The firmware is optimized for:
 - Efficient string handling
 - Static memory allocation where possible
 
+## Adding New Parameters
+
+To add a new parameter to the system, follow these steps:
+
+1. **Add to ParameterType enum** in `src/ESP8266DataTypes.h`:
+
+   ```cpp
+   enum class ParameterType : uint8_t {
+       // ... existing parameters ...
+       NEW_PARAMETER = 10  // Use next available number
+   };
+   ```
+
+2. **Add to parameter descriptor table** in `src/ESP8266Parameters.cpp`:
+
+   ```cpp
+   const ParamDesc kParams[] PROGMEM = {
+       // ... existing parameters ...
+       {ParameterType::NEW_PARAMETER, PSTR("New Parameter"), PSTR("unit"), register_addr, scale_factor}
+   };
+   ```
+
+3. **Include in polling configuration** by updating the parameters list in `main.cpp`:
+   ```cpp
+   std::vector<ParameterType> params = {
+       // ... existing parameters ...
+       ParameterType::NEW_PARAMETER
+   };
+   ```
+
+That's it! The unified parameter system will automatically handle:
+
+- Reading from the correct Modbus register with proper scaling
+- Displaying the parameter with correct name and unit
+- Including it in JSON serialization and data uploads
+
+### Parameter Descriptor Table
+
+The system uses a centralized parameter descriptor table that eliminates duplication between the polling configuration and inverter driver. Each parameter is defined once with:
+
+- **ID**: Unique ParameterType enum value
+- **Name**: Human-readable name (stored in flash memory)
+- **Unit**: Measurement unit (stored in flash memory)
+- **Register**: Modbus register address
+- **Scale**: Division factor to convert raw register value to actual value
+
+This approach provides:
+
+- Single source of truth for parameter metadata
+- No duplicated names, units, registers, or scales
+- Easy addition/removal of parameters
+- Optimized flash memory usage
+- Backward compatibility with legacy API
+
 ## Troubleshooting
 
 ### Common Issues
