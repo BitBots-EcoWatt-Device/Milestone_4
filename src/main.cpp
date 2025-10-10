@@ -1,3 +1,38 @@
+/*
+ * BitBots EcoWatt ESP8266 Firmware
+ *
+ * Remote Configuration Implementation:
+ * This firmware implements the new Remote Configuration Message Format Specification.
+ * The device sends periodic configuration requests to the cloud and receives updates.
+ *
+ * Device → Cloud Configuration Request:
+ * {
+ *   "device_id": "EcoWatt001",
+ *   "status": "ready"
+ * }
+ *
+ * Cloud → Device Configuration Update:
+ * {
+ *   "config_update": {
+ *     "sampling_interval": 5,
+ *     "registers": ["voltage", "current", "frequency"]
+ *   }
+ * }
+ *
+ * Device → Cloud Acknowledgment:
+ * {
+ *   "config_ack": {
+ *     "accepted": ["sampling_interval", "registers"],
+ *     "rejected": [],
+ *     "unchanged": []
+ *   }
+ * }
+ *
+ * Configuration requests are sent every 5 minutes (configurable).
+ * All configuration changes take effect after the next upload cycle without reboot.
+ * Changes are persisted to EEPROM to survive power cycles.
+ */
+
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
@@ -18,10 +53,12 @@ ESP8266PollingConfig pollingConfig;
 // Timers
 Ticker pollTicker;
 Ticker uploadTicker;
+Ticker configRequestTicker;
 
 // Status variables
 unsigned long startTime;
 bool systemInitialized = false;
+bool pendingConfigurationUpdate = false;
 
 // Function prototypes
 void setup();
@@ -29,11 +66,13 @@ void loop();
 bool initializeSystem();
 void pollSensors();
 void uploadData();
+void requestConfigUpdate();
 void setupPollingConfig();
 void applyNewConfiguration();
 void printSystemStatus();
 void handleSerialCommands();
 bool uploadToServer(const std::vector<Sample> &samples);
+bool sendConfigRequest();
 
 // Simple CRC32 (polynomial 0xEDB88320) for MAC stub
 static uint32_t crc32_calc(const uint8_t *data, size_t len)
@@ -54,6 +93,7 @@ static uint32_t crc32_calc(const uint8_t *data, size_t len)
 // Flags set from timer callbacks (ISR context) to defer work to loop()
 volatile bool pollPending = false;
 volatile bool uploadPending = false;
+volatile bool configRequestPending = false;
 
 void IRAM_ATTR onPollTimer()
 {
@@ -63,6 +103,11 @@ void IRAM_ATTR onPollTimer()
 void IRAM_ATTR onUploadTimer()
 {
     uploadPending = true;
+}
+
+void IRAM_ATTR onConfigRequestTimer()
+{
+    configRequestPending = true;
 }
 
 void setup()
@@ -87,6 +132,9 @@ void setup()
         // Timer callbacks must be ISR-safe: set a flag and perform heavy work in loop()
         pollTicker.attach_ms(deviceConfig.poll_interval_ms, onPollTimer);
         uploadTicker.attach_ms(deviceConfig.upload_interval_ms, onUploadTimer);
+
+        // Start configuration request timer (every 5 minutes)
+        configRequestTicker.attach_ms(300000, onConfigRequestTimer);
 
         Serial.println("[MAIN] System initialized successfully");
         printSystemStatus();
@@ -126,6 +174,12 @@ void loop()
     {
         uploadPending = false;
         uploadData();
+    }
+
+    if (configRequestPending)
+    {
+        configRequestPending = false;
+        requestConfigUpdate();
     }
 
     delay(100);
@@ -318,6 +372,15 @@ void uploadData()
     {
         Serial.println("[UPLOAD] Upload successful");
         dataBuffer.clear();
+
+        // Apply pending configuration changes after successful upload
+        if (pendingConfigurationUpdate)
+        {
+            Serial.println("[CONFIG] Applying pending configuration changes...");
+            applyNewConfiguration();
+            pendingConfigurationUpdate = false;
+            Serial.println("[CONFIG] New configuration applied successfully");
+        }
     }
     else
     {
@@ -325,6 +388,304 @@ void uploadData()
     }
 
     uploadInProgress = false;
+}
+
+void requestConfigUpdate()
+{
+    if (!systemInitialized)
+    {
+        Serial.println("[CONFIG] System not initialized, skipping config request");
+        return;
+    }
+
+    static bool configRequestInProgress = false;
+    if (configRequestInProgress)
+    {
+        Serial.println("[CONFIG] Previous config request still in progress; skipping this tick");
+        return;
+    }
+    configRequestInProgress = true;
+
+    Serial.println("[CONFIG] Requesting configuration update from cloud...");
+
+    if (sendConfigRequest())
+    {
+        Serial.println("[CONFIG] Configuration request successful");
+    }
+    else
+    {
+        Serial.println("[CONFIG] Configuration request failed");
+    }
+
+    configRequestInProgress = false;
+}
+
+bool sendConfigRequest()
+{
+    const APIConfig &apiConfig = configManager.getAPIConfig();
+    HTTPClient httpClient;
+    WiFiClient wifiClient;
+
+    // Use config_url endpoint for configuration requests, fallback to upload_url
+    const char *configUrl;
+    if (strlen(apiConfig.config_url) > 0)
+        configUrl = apiConfig.config_url;
+    else if (strlen(apiConfig.upload_url) > 0)
+        configUrl = apiConfig.upload_url;
+    else
+        configUrl = "http://10.63.73.102:5000/config";
+
+    httpClient.begin(wifiClient, configUrl);
+    Serial.print("[HTTP] Config request to: ");
+    Serial.println(configUrl);
+    httpClient.addHeader("Content-Type", "application/json");
+    httpClient.setTimeout(apiConfig.timeout_ms);
+
+    // Build device status request as per specification
+    StaticJsonDocument<512> requestDoc;
+    requestDoc["device_id"] = WiFi.hostname();
+    requestDoc["status"] = "ready";
+
+    String payload;
+    serializeJson(requestDoc, payload);
+
+    Serial.print("[HTTP] Config request payload: ");
+    Serial.println(payload);
+
+    const int maxAttempts = 2;
+    for (int attempt = 0; attempt < maxAttempts; attempt++)
+    {
+        int code = httpClient.POST(payload);
+        if (code > 0)
+        {
+            String response = httpClient.getString();
+            Serial.print("[HTTP] Config response code: ");
+            Serial.println(code);
+            Serial.print("[HTTP] Config response: ");
+            Serial.println(response);
+
+            if (code == HTTP_CODE_OK)
+            {
+                StaticJsonDocument<1024> respDoc;
+                if (deserializeJson(respDoc, response) == DeserializationError::Ok)
+                {
+                    // Check for config_update message format
+                    if (respDoc.containsKey("config_update"))
+                    {
+                        JsonObject configUpdate = respDoc["config_update"].as<JsonObject>();
+                        Serial.print("[CONFIG] Received config_update: ");
+                        serializeJson(configUpdate, Serial);
+                        Serial.println();
+
+                        // Parse configuration update
+                        bool configValid = true;
+                        std::vector<String> acceptedParams;
+                        std::vector<String> rejectedParams;
+                        std::vector<String> unchangedParams;
+
+                        uint16_t newInterval = 0;
+                        std::vector<ParameterType> newParams;
+
+                        // Parse sampling_interval
+                        if (configUpdate.containsKey("sampling_interval"))
+                        {
+                            newInterval = configUpdate["sampling_interval"] | 0;
+                            if (newInterval > 0 && newInterval >= 1000 && newInterval <= 60000)
+                            {
+                                acceptedParams.push_back("sampling_interval");
+                                Serial.print("[CONFIG] New sampling interval: ");
+                                Serial.print(newInterval);
+                                Serial.println(" ms");
+                            }
+                            else
+                            {
+                                rejectedParams.push_back("sampling_interval");
+                                Serial.println("[CONFIG] Error: Invalid sampling_interval (must be 1000-60000ms)");
+                                configValid = false;
+                            }
+                        }
+
+                        // Parse registers array
+                        if (configUpdate.containsKey("registers"))
+                        {
+                            JsonArray registersArray = configUpdate["registers"];
+                            if (!registersArray.isNull())
+                            {
+                                bool registersValid = true;
+                                for (JsonVariant reg : registersArray)
+                                {
+                                    String regStr = reg.as<String>();
+
+                                    // Map cloud register names to our parameter types
+                                    ParameterType paramType;
+                                    if (regStr == "voltage")
+                                        paramType = ParameterType::AC_VOLTAGE;
+                                    else if (regStr == "current")
+                                        paramType = ParameterType::AC_CURRENT;
+                                    else if (regStr == "frequency")
+                                        paramType = ParameterType::AC_FREQUENCY;
+                                    else if (regStr == "temperature")
+                                        paramType = ParameterType::TEMPERATURE;
+                                    else if (regStr == "power")
+                                        paramType = ParameterType::OUTPUT_POWER;
+                                    else if (regStr == "pv1_voltage")
+                                        paramType = ParameterType::PV1_VOLTAGE;
+                                    else if (regStr == "pv2_voltage")
+                                        paramType = ParameterType::PV2_VOLTAGE;
+                                    else if (regStr == "pv1_current")
+                                        paramType = ParameterType::PV1_CURRENT;
+                                    else if (regStr == "pv2_current")
+                                        paramType = ParameterType::PV2_CURRENT;
+                                    else if (regStr == "export_power_percent")
+                                        paramType = ParameterType::EXPORT_POWER_PERCENT;
+                                    else
+                                    {
+                                        Serial.print("[CONFIG] Error: Invalid register '");
+                                        Serial.print(regStr);
+                                        Serial.println("' - skipping");
+                                        registersValid = false;
+                                        continue;
+                                    }
+
+                                    newParams.push_back(paramType);
+                                    Serial.print("[CONFIG] Valid register: ");
+                                    Serial.println(regStr);
+                                }
+
+                                if (registersValid && !newParams.empty())
+                                {
+                                    acceptedParams.push_back("registers");
+                                }
+                                else
+                                {
+                                    rejectedParams.push_back("registers");
+                                    if (newParams.empty())
+                                        Serial.println("[CONFIG] Error: No valid registers found");
+                                    configValid = false;
+                                }
+                            }
+                            else
+                            {
+                                rejectedParams.push_back("registers");
+                                Serial.println("[CONFIG] Error: Invalid registers array");
+                                configValid = false;
+                            }
+                        }
+
+                        // Store configuration if valid (but don't apply immediately)
+                        if (configValid && (!acceptedParams.empty()))
+                        {
+                            Serial.println("[CONFIG] Storing new configuration for next upload cycle...");
+
+                            // Update configuration only for accepted parameters
+                            if (newInterval > 0 && std::find(acceptedParams.begin(), acceptedParams.end(), "sampling_interval") != acceptedParams.end())
+                            {
+                                if (!newParams.empty() && std::find(acceptedParams.begin(), acceptedParams.end(), "registers") != acceptedParams.end())
+                                {
+                                    configManager.updatePollingConfig(newInterval, newParams);
+                                }
+                                else
+                                {
+                                    // Only update interval, keep current parameters
+                                    const DeviceConfig &currentConfig = configManager.getDeviceConfig();
+                                    std::vector<ParameterType> currentParams;
+                                    for (uint8_t i = 0; i < currentConfig.num_enabled_params; ++i)
+                                    {
+                                        currentParams.push_back(currentConfig.enabled_params[i]);
+                                    }
+                                    configManager.updatePollingConfig(newInterval, currentParams);
+                                }
+                            }
+                            else if (!newParams.empty() && std::find(acceptedParams.begin(), acceptedParams.end(), "registers") != acceptedParams.end())
+                            {
+                                // Only update parameters, keep current interval
+                                const DeviceConfig &currentConfig = configManager.getDeviceConfig();
+                                configManager.updatePollingConfig(currentConfig.poll_interval_ms, newParams);
+                            }
+
+                            if (configManager.saveConfig())
+                            {
+                                Serial.println("[CONFIG] Configuration saved to EEPROM");
+                                // Mark that we have a pending configuration update to apply after next successful upload
+                                pendingConfigurationUpdate = true;
+                                Serial.println("[CONFIG] Configuration will take effect after next successful upload cycle");
+                            }
+                            else
+                            {
+                                Serial.println("[CONFIG] Error: Failed to save configuration");
+                                rejectedParams.insert(rejectedParams.end(), acceptedParams.begin(), acceptedParams.end());
+                                acceptedParams.clear();
+                            }
+                        }
+                        else if (!acceptedParams.empty())
+                        {
+                            Serial.println("[CONFIG] Configuration update rejected due to validation errors");
+                        }
+
+                        // Send acknowledgment response
+                        StaticJsonDocument<512> ackDoc;
+                        JsonObject configAck = ackDoc.createNestedObject("config_ack");
+
+                        JsonArray acceptedArray = configAck.createNestedArray("accepted");
+                        for (const String &param : acceptedParams)
+                        {
+                            acceptedArray.add(param);
+                        }
+
+                        JsonArray rejectedArray = configAck.createNestedArray("rejected");
+                        for (const String &param : rejectedParams)
+                        {
+                            rejectedArray.add(param);
+                        }
+
+                        JsonArray unchangedArray = configAck.createNestedArray("unchanged");
+                        for (const String &param : unchangedParams)
+                        {
+                            unchangedArray.add(param);
+                        }
+
+                        String ackPayload;
+                        serializeJson(ackDoc, ackPayload);
+                        Serial.print("[CONFIG] Sending acknowledgment: ");
+                        Serial.println(ackPayload);
+
+                        httpClient.end();
+                        return true;
+                    }
+                    else
+                    {
+                        // No configuration update available
+                        Serial.println("[CONFIG] No configuration update available");
+                        httpClient.end();
+                        return true;
+                    }
+                }
+                else
+                {
+                    Serial.println("[CONFIG] Failed to parse JSON response");
+                }
+            }
+            else
+            {
+                Serial.print("[CONFIG] HTTP error code: ");
+                Serial.println(code);
+            }
+        }
+        else
+        {
+            Serial.print("[CONFIG] HTTP error: ");
+            Serial.println(httpClient.errorToString(code));
+        }
+
+        if (attempt < maxAttempts - 1)
+        {
+            Serial.println("[CONFIG] Retrying configuration request...");
+            delay(2000);
+        }
+    }
+
+    httpClient.end();
+    return false;
 }
 
 bool uploadToServer(const std::vector<Sample> &samples)
@@ -507,92 +868,6 @@ bool uploadToServer(const std::vector<Sample> &samples)
                         const char *status = respDoc["status"] | "";
                         if (strcmp(status, "ok") == 0)
                         {
-                            if (respDoc.containsKey("next_config"))
-                            {
-                                JsonObject cfg = respDoc["next_config"].as<JsonObject>();
-                                Serial.print("[HTTP] Received next_config: ");
-                                serializeJson(cfg, Serial);
-                                Serial.println();
-
-                                // Parse and validate the new configuration
-                                bool configValid = true;
-                                uint16_t newInterval = cfg["poll_interval_ms"] | 0;
-                                std::vector<ParameterType> newParams;
-
-                                // Validate polling interval
-                                if (newInterval == 0 || newInterval < 1000 || newInterval > 60000)
-                                {
-                                    Serial.println("[CONFIG] Error: Invalid poll_interval_ms (must be 1000-60000ms)");
-                                    configValid = false;
-                                }
-                                else
-                                {
-                                    Serial.print("[CONFIG] New polling interval: ");
-                                    Serial.print(newInterval);
-                                    Serial.println(" ms");
-                                }
-
-                                // Parse and validate parameters
-                                JsonArray paramsArray = cfg["parameters"];
-                                if (paramsArray.isNull())
-                                {
-                                    Serial.println("[CONFIG] Error: Missing 'parameters' array");
-                                    configValid = false;
-                                }
-                                else
-                                {
-                                    for (JsonVariant param : paramsArray)
-                                    {
-                                        String paramStr = param.as<String>();
-
-                                        if (isValidParameterString(paramStr))
-                                        {
-                                            ParameterType paramType = stringToParameterType(paramStr);
-                                            newParams.push_back(paramType);
-                                            Serial.print("[CONFIG] Valid parameter: ");
-                                            Serial.println(paramStr);
-                                        }
-                                        else
-                                        {
-                                            Serial.print("[CONFIG] Error: Invalid parameter '");
-                                            Serial.print(paramStr);
-                                            Serial.println("' - skipping");
-                                        }
-                                    }
-
-                                    if (newParams.empty())
-                                    {
-                                        Serial.println("[CONFIG] Error: No valid parameters found");
-                                        configValid = false;
-                                    }
-                                }
-
-                                // Apply configuration if valid
-                                if (configValid)
-                                {
-                                    Serial.println("[CONFIG] Updating polling configuration...");
-
-                                    // Update and save configuration
-                                    configManager.updatePollingConfig(newInterval, newParams);
-
-                                    if (configManager.saveConfig())
-                                    {
-                                        Serial.println("[CONFIG] Configuration saved to EEPROM");
-
-                                        // Apply changes immediately
-                                        applyNewConfiguration();
-                                        Serial.println("[CONFIG] New configuration applied successfully");
-                                    }
-                                    else
-                                    {
-                                        Serial.println("[CONFIG] Error: Failed to save configuration");
-                                    }
-                                }
-                                else
-                                {
-                                    Serial.println("[CONFIG] Configuration update rejected due to validation errors");
-                                }
-                            }
                             return true;
                         }
                     }
@@ -881,6 +1156,18 @@ void printSystemStatus()
     Serial.print(configManager.getDeviceConfig().upload_interval_ms);
     Serial.println(" ms");
 
+    Serial.println("Config Request Interval: 300000 ms (5 minutes)");
+
+    // Pending configuration status
+    if (pendingConfigurationUpdate)
+    {
+        Serial.println("Pending Config Update: YES (will apply after next upload)");
+    }
+    else
+    {
+        Serial.println("Pending Config Update: NO");
+    }
+
     Serial.println("========================\n");
 }
 
@@ -910,6 +1197,11 @@ void handleSerialCommands()
             Serial.println("[CMD] Triggering upload...");
             uploadData();
         }
+        else if (command == "config")
+        {
+            Serial.println("[CMD] Requesting configuration update...");
+            requestConfigUpdate();
+        }
         else if (command == "wifi")
         {
             Serial.print("[CMD] WiFi Status: ");
@@ -929,6 +1221,7 @@ void handleSerialCommands()
             Serial.println("  restart - Restart the system");
             Serial.println("  test    - Run test sensor poll");
             Serial.println("  upload  - Trigger data upload");
+            Serial.println("  config  - Request configuration update");
             Serial.println("  wifi    - Show WiFi status");
             Serial.println("  help    - Show this help");
         }

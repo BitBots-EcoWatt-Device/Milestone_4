@@ -28,12 +28,20 @@ Update the server endpoint in `ESP8266Config.cpp`:
 ```cpp
 strcpy(config_.api.read_url, "http://YOUR_SERVER:8080/api/inverter/read");
 strcpy(config_.api.write_url, "http://YOUR_SERVER:8080/api/inverter/write");
+strcpy(config_.api.upload_url, "http://YOUR_SERVER:5000/upload");
+strcpy(config_.api.config_url, "http://YOUR_SERVER:5000/config");
 ```
 
 Also update the upload endpoint in `main.cpp`:
 
 ```cpp
-httpClient.begin(wifiClient, "http://YOUR_SERVER:5001/upload");
+httpClient.begin(wifiClient, "http://YOUR_SERVER:5000/upload");
+```
+
+And optionally set a dedicated configuration endpoint:
+
+```cpp
+strcpy(config_.api.config_url, "http://YOUR_SERVER:5000/config");
 ```
 
 ## Hardware Connections
@@ -49,6 +57,100 @@ For future direct Modbus RTU connection:
 - **GND**: Common ground
 - **VCC**: 3.3V power supply
 
+## Remote Configuration
+
+The ESP8266 firmware implements a separate configuration update system that follows the defined Remote Configuration Message Format Specification.
+
+### Configuration Request Cycle
+
+The device automatically sends configuration requests to the cloud every 5 minutes using this format:
+
+**Device → Cloud Request:**
+
+```json
+{
+  "device_id": "EcoWatt001",
+  "status": "ready"
+}
+```
+
+### Configuration Updates
+
+The cloud can respond with configuration updates using this format:
+
+**Cloud → Device Response:**
+
+```json
+{
+  "config_update": {
+    "sampling_interval": 5000,
+    "registers": ["voltage", "current", "frequency", "temperature", "power"]
+  }
+}
+```
+
+Supported register names:
+
+- `voltage` - AC voltage measurement
+- `current` - AC current measurement
+- `frequency` - AC frequency measurement
+- `temperature` - Inverter temperature
+- `power` - Output power
+- `pv1_voltage`, `pv2_voltage` - PV input voltages
+- `pv1_current`, `pv2_current` - PV input currents
+- `export_power_percent` - Export power percentage
+
+### Configuration Acknowledgment
+
+After processing the configuration update, the device sends an acknowledgment:
+
+**Device → Cloud Acknowledgment:**
+
+```json
+{
+  "config_ack": {
+    "accepted": ["sampling_interval", "registers"],
+    "rejected": [],
+    "unchanged": []
+  }
+}
+```
+
+### Configuration Validation
+
+- `sampling_interval`: Must be between 1000-60000 milliseconds
+- `registers`: Must contain valid register names from the supported list
+- Invalid parameters are rejected and listed in the acknowledgment
+- Configuration changes are stored immediately but take effect only after the next successful upload cycle
+- All changes are persisted to EEPROM to survive power cycles
+
+### Configuration Application Timing
+
+Configuration updates follow this sequence:
+
+1. Device sends periodic configuration request
+2. Cloud responds with configuration update (if any)
+3. Device validates and stores the new configuration in EEPROM
+4. Device sends acknowledgment back to cloud
+5. **Configuration changes take effect after the next successful data upload**
+
+This approach ensures:
+
+- Data consistency (no mid-cycle parameter changes)
+- Atomic configuration updates
+- Reliable rollback if upload fails
+- Clear state transitions
+
+You can check for pending configuration updates using the `status` serial command.
+
+### Manual Configuration Request
+
+You can trigger a manual configuration request using the serial command:
+
+```
+config
+```
+
 ## Serial Commands
 
 Connect to the serial monitor at 115200 baud to use these commands:
@@ -57,6 +159,7 @@ Connect to the serial monitor at 115200 baud to use these commands:
 - `restart` - Restart the device
 - `test` - Run a test sensor poll
 - `upload` - Trigger immediate data upload
+- `config` - Request configuration update from cloud
 - `wifi` - Show WiFi connection status
 - `help` - Show available commands
 

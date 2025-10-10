@@ -21,6 +21,7 @@ struct APIConfig
     char read_url[128];
     char write_url[128];
     char upload_url[128];
+    char config_url[128];
     uint16_t timeout_ms;
 };
 
@@ -59,7 +60,7 @@ public:
 
     // Setters
     void setWiFiConfig(const char *ssid, const char *password, const char *hostname = "bitbots-ecoWatt");
-    void setAPIConfig(const char *api_key, const char *read_url, const char *write_url, const char *upload_url = NULL, uint16_t timeout_ms = 5000);
+    void setAPIConfig(const char *api_key, const char *read_url, const char *write_url, const char *upload_url = NULL, const char *config_url = NULL, uint16_t timeout_ms = 5000);
     void setDeviceConfig(uint8_t slave_addr, uint16_t poll_interval, uint16_t upload_interval, uint8_t buffer_size);
     void updatePollingConfig(uint16_t new_interval, const std::vector<ParameterType> &new_params);
 
