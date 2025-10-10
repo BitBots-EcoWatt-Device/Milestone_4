@@ -84,5 +84,6 @@ private:
 
 String parameterTypeToString(ParameterType param);
 ParameterType stringToParameterType(const String &str);
+bool isValidParameterString(const String &str);
 
 #endif // ESP8266_DATA_TYPES_H

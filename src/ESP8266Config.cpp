@@ -56,8 +56,8 @@ void ConfigManager::loadDefaults()
     // API defaults
     strcpy(config_.api.api_key, "NjhhZWIwNDU1ZDdmMzg3MzNiMTQ5YTFjOjY4YWViMDQ1NWQ3ZjM4NzMzYjE0OWExMg==");
     strcpy(config_.api.read_url, "http://20.15.114.131:8080/api/inverter/read");
-    strcpy(config_.api.write_url,"http://20.15.114.131:8080/api/inverter/write");
-    strcpy(config_.api.upload_url,"http://10.178.162.228:5000/upload");
+    strcpy(config_.api.write_url, "http://20.15.114.131:8080/api/inverter/write");
+    strcpy(config_.api.upload_url, "http://10.178.162.228:5000/upload");
     config_.api.timeout_ms = 5000;
 
     // Device defaults
@@ -65,6 +65,14 @@ void ConfigManager::loadDefaults()
     config_.device.poll_interval_ms = 5000;
     config_.device.upload_interval_ms = 15000;
     config_.device.buffer_size = 10;
+
+    // Initialize default polling parameters
+    config_.device.num_enabled_params = 5;
+    config_.device.enabled_params[0] = ParameterType::AC_VOLTAGE;
+    config_.device.enabled_params[1] = ParameterType::AC_CURRENT;
+    config_.device.enabled_params[2] = ParameterType::AC_FREQUENCY;
+    config_.device.enabled_params[3] = ParameterType::TEMPERATURE;
+    config_.device.enabled_params[4] = ParameterType::OUTPUT_POWER;
 
     config_.magic = CONFIG_MAGIC;
 }
@@ -110,4 +118,14 @@ bool ConfigManager::isConfigValid() const
     return config_.magic == CONFIG_MAGIC &&
            strlen(config_.wifi.ssid) > 0 &&
            strlen(config_.api.api_key) > 0;
+}
+
+void ConfigManager::updatePollingConfig(uint16_t new_interval, const std::vector<ParameterType> &new_params)
+{
+    config_.device.poll_interval_ms = new_interval;
+    config_.device.num_enabled_params = min((uint8_t)new_params.size(), (uint8_t)MAX_POLLING_PARAMS);
+    for (uint8_t i = 0; i < config_.device.num_enabled_params; ++i)
+    {
+        config_.device.enabled_params[i] = new_params[i];
+    }
 }

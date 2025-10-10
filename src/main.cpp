@@ -30,6 +30,7 @@ bool initializeSystem();
 void pollSensors();
 void uploadData();
 void setupPollingConfig();
+void applyNewConfiguration();
 void printSystemStatus();
 void handleSerialCommands();
 bool uploadToServer(const std::vector<Sample> &samples);
@@ -161,16 +162,34 @@ void setupPollingConfig()
 {
     Serial.println("[CONFIG] Setting up polling configuration...");
 
-    // Configure to poll key parameters
-    std::vector<ParameterType> params = {
-        ParameterType::AC_VOLTAGE,
-        ParameterType::AC_CURRENT,
-        ParameterType::AC_FREQUENCY,
-        ParameterType::TEMPERATURE,
-        ParameterType::OUTPUT_POWER};
+    // Read parameters from configManager instead of hardcoded values
+    const DeviceConfig &deviceConfig = configManager.getDeviceConfig();
+    std::vector<ParameterType> params;
+
+    for (uint8_t i = 0; i < deviceConfig.num_enabled_params; ++i)
+    {
+        params.push_back(deviceConfig.enabled_params[i]);
+    }
 
     pollingConfig.setParameters(params);
     pollingConfig.printEnabledParameters();
+}
+
+void applyNewConfiguration()
+{
+    Serial.println("[CONFIG] Applying new configuration...");
+
+    // Reconfigure polling parameters
+    setupPollingConfig();
+
+    // Update polling timer with new interval
+    const DeviceConfig &deviceConfig = configManager.getDeviceConfig();
+    pollTicker.detach();
+    pollTicker.attach_ms(deviceConfig.poll_interval_ms, onPollTimer);
+
+    Serial.print("[CONFIG] New polling interval: ");
+    Serial.print(deviceConfig.poll_interval_ms);
+    Serial.println(" ms");
 }
 
 void pollSensors()
@@ -491,9 +510,88 @@ bool uploadToServer(const std::vector<Sample> &samples)
                             if (respDoc.containsKey("next_config"))
                             {
                                 JsonObject cfg = respDoc["next_config"].as<JsonObject>();
-                                Serial.print("[HTTP] next_config: ");
+                                Serial.print("[HTTP] Received next_config: ");
                                 serializeJson(cfg, Serial);
                                 Serial.println();
+
+                                // Parse and validate the new configuration
+                                bool configValid = true;
+                                uint16_t newInterval = cfg["poll_interval_ms"] | 0;
+                                std::vector<ParameterType> newParams;
+
+                                // Validate polling interval
+                                if (newInterval == 0 || newInterval < 1000 || newInterval > 60000)
+                                {
+                                    Serial.println("[CONFIG] Error: Invalid poll_interval_ms (must be 1000-60000ms)");
+                                    configValid = false;
+                                }
+                                else
+                                {
+                                    Serial.print("[CONFIG] New polling interval: ");
+                                    Serial.print(newInterval);
+                                    Serial.println(" ms");
+                                }
+
+                                // Parse and validate parameters
+                                JsonArray paramsArray = cfg["parameters"];
+                                if (paramsArray.isNull())
+                                {
+                                    Serial.println("[CONFIG] Error: Missing 'parameters' array");
+                                    configValid = false;
+                                }
+                                else
+                                {
+                                    for (JsonVariant param : paramsArray)
+                                    {
+                                        String paramStr = param.as<String>();
+
+                                        if (isValidParameterString(paramStr))
+                                        {
+                                            ParameterType paramType = stringToParameterType(paramStr);
+                                            newParams.push_back(paramType);
+                                            Serial.print("[CONFIG] Valid parameter: ");
+                                            Serial.println(paramStr);
+                                        }
+                                        else
+                                        {
+                                            Serial.print("[CONFIG] Error: Invalid parameter '");
+                                            Serial.print(paramStr);
+                                            Serial.println("' - skipping");
+                                        }
+                                    }
+
+                                    if (newParams.empty())
+                                    {
+                                        Serial.println("[CONFIG] Error: No valid parameters found");
+                                        configValid = false;
+                                    }
+                                }
+
+                                // Apply configuration if valid
+                                if (configValid)
+                                {
+                                    Serial.println("[CONFIG] Updating polling configuration...");
+
+                                    // Update and save configuration
+                                    configManager.updatePollingConfig(newInterval, newParams);
+
+                                    if (configManager.saveConfig())
+                                    {
+                                        Serial.println("[CONFIG] Configuration saved to EEPROM");
+
+                                        // Apply changes immediately
+                                        applyNewConfiguration();
+                                        Serial.println("[CONFIG] New configuration applied successfully");
+                                    }
+                                    else
+                                    {
+                                        Serial.println("[CONFIG] Error: Failed to save configuration");
+                                    }
+                                }
+                                else
+                                {
+                                    Serial.println("[CONFIG] Configuration update rejected due to validation errors");
+                                }
                             }
                             return true;
                         }

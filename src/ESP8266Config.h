@@ -3,6 +3,10 @@
 
 #include <Arduino.h>
 #include <EEPROM.h>
+#include <vector>
+#include "ESP8266DataTypes.h"
+
+#define MAX_POLLING_PARAMS 10
 
 struct WiFiConfig
 {
@@ -26,6 +30,8 @@ struct DeviceConfig
     uint16_t poll_interval_ms;
     uint16_t upload_interval_ms;
     uint8_t buffer_size;
+    ParameterType enabled_params[MAX_POLLING_PARAMS];
+    uint8_t num_enabled_params;
 };
 
 struct ESP8266Config
@@ -55,6 +61,7 @@ public:
     void setWiFiConfig(const char *ssid, const char *password, const char *hostname = "bitbots-ecoWatt");
     void setAPIConfig(const char *api_key, const char *read_url, const char *write_url, const char *upload_url = NULL, uint16_t timeout_ms = 5000);
     void setDeviceConfig(uint8_t slave_addr, uint16_t poll_interval, uint16_t upload_interval, uint8_t buffer_size);
+    void updatePollingConfig(uint16_t new_interval, const std::vector<ParameterType> &new_params);
 
 private:
     ESP8266Config config_;

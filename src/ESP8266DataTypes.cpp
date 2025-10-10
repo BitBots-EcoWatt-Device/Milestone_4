@@ -76,3 +76,17 @@ ParameterType stringToParameterType(const String &str)
         return ParameterType::OUTPUT_POWER;
     return ParameterType::AC_VOLTAGE; // Default
 }
+
+bool isValidParameterString(const String &str)
+{
+    return (str == "AC_VOLTAGE" ||
+            str == "AC_CURRENT" ||
+            str == "AC_FREQUENCY" ||
+            str == "PV1_VOLTAGE" ||
+            str == "PV2_VOLTAGE" ||
+            str == "PV1_CURRENT" ||
+            str == "PV2_CURRENT" ||
+            str == "TEMPERATURE" ||
+            str == "EXPORT_POWER_PERCENT" ||
+            str == "OUTPUT_POWER");
+}
