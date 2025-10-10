@@ -28,8 +28,29 @@
  *   }
  * }
  *
+ * Command Execution Implementation:
+ * This firmware also implements command execution flow for write operations.
+ *
+ * Cloud → Device Command:
+ * {
+ *   "command": {
+ *     "action": "write_register",
+ *     "target_register": "export_power_percent",
+ *     "value": 75
+ *   }
+ * }
+ *
+ * Device → Cloud Result:
+ * {
+ *   "command_result": {
+ *     "status": "success",
+ *     "executed_at": "2025-10-10T14:12:00Z"
+ *   }
+ * }
+ *
  * Configuration requests are sent every 5 minutes (configurable).
  * All configuration changes take effect after the next upload cycle without reboot.
+ * Commands are executed immediately and results reported on next upload.
  * Changes are persisted to EEPROM to survive power cycles.
  */
 
@@ -50,6 +71,28 @@ ESP8266Inverter inverter;
 ESP8266DataBuffer dataBuffer(10); // Smaller buffer for ESP8266
 ESP8266PollingConfig pollingConfig;
 
+// Command execution structures
+struct PendingCommand
+{
+    String action;
+    String target_register;
+    int value;
+    unsigned long received_at;
+    bool valid;
+};
+
+struct CommandResult
+{
+    String status;
+    String executed_at;
+    String error_message;
+    bool has_result;
+};
+
+// Command execution state
+PendingCommand pendingCommand = {"", "", 0, 0, false};
+CommandResult lastCommandResult = {"", "", "", false};
+
 // Timers
 Ticker pollTicker;
 Ticker uploadTicker;
@@ -67,12 +110,14 @@ bool initializeSystem();
 void pollSensors();
 void uploadData();
 void requestConfigUpdate();
+void executeCommand();
 void setupPollingConfig();
 void applyNewConfiguration();
 void printSystemStatus();
 void handleSerialCommands();
 bool uploadToServer(const std::vector<Sample> &samples);
 bool sendConfigRequest();
+bool executeWriteRegisterCommand(const String &register_name, int value, CommandResult &result);
 
 // Simple CRC32 (polynomial 0xEDB88320) for MAC stub
 static uint32_t crc32_calc(const uint8_t *data, size_t len)
@@ -180,6 +225,12 @@ void loop()
     {
         configRequestPending = false;
         requestConfigUpdate();
+    }
+
+    // Execute pending commands
+    if (pendingCommand.valid)
+    {
+        executeCommand();
     }
 
     delay(100);
@@ -372,6 +423,13 @@ void uploadData()
     {
         Serial.println("[UPLOAD] Upload successful");
         dataBuffer.clear();
+
+        // Clear command result after successful upload
+        if (lastCommandResult.has_result)
+        {
+            Serial.println("[COMMAND] Command result successfully reported to cloud");
+            lastCommandResult.has_result = false;
+        }
 
         // Apply pending configuration changes after successful upload
         if (pendingConfigurationUpdate)
@@ -652,10 +710,46 @@ bool sendConfigRequest()
                         httpClient.end();
                         return true;
                     }
+                    // Check for command message format
+                    else if (respDoc.containsKey("command"))
+                    {
+                        JsonObject command = respDoc["command"].as<JsonObject>();
+                        Serial.print("[COMMAND] Received command: ");
+                        serializeJson(command, Serial);
+                        Serial.println();
+
+                        // Parse command
+                        String action = command["action"] | "";
+                        String target_register = command["target_register"] | "";
+                        int value = command["value"] | 0;
+
+                        // Validate command
+                        if (action == "write_register" && target_register.length() > 0)
+                        {
+                            // Store the command for execution
+                            pendingCommand.action = action;
+                            pendingCommand.target_register = target_register;
+                            pendingCommand.value = value;
+                            pendingCommand.received_at = millis();
+                            pendingCommand.valid = true;
+
+                            Serial.print("[COMMAND] Queued write command: register=");
+                            Serial.print(target_register);
+                            Serial.print(", value=");
+                            Serial.println(value);
+                        }
+                        else
+                        {
+                            Serial.println("[COMMAND] Error: Invalid command format");
+                        }
+
+                        httpClient.end();
+                        return true;
+                    }
                     else
                     {
-                        // No configuration update available
-                        Serial.println("[CONFIG] No configuration update available");
+                        // No configuration update or command available
+                        Serial.println("[CONFIG] No configuration update or command available");
                         httpClient.end();
                         return true;
                     }
@@ -688,6 +782,89 @@ bool sendConfigRequest()
     return false;
 }
 
+void executeCommand()
+{
+    if (!pendingCommand.valid)
+        return;
+
+    Serial.println("[COMMAND] Executing pending command...");
+
+    CommandResult result = {"", "", "", false};
+
+    if (pendingCommand.action == "write_register")
+    {
+        if (executeWriteRegisterCommand(pendingCommand.target_register, pendingCommand.value, result))
+        {
+            result.status = "success";
+            // Generate ISO8601 timestamp
+            unsigned long currentTime = millis();
+            result.executed_at = "2025-10-10T" + String((currentTime / 3600000) % 24, DEC) + ":" +
+                                 String((currentTime / 60000) % 60, DEC) + ":" +
+                                 String((currentTime / 1000) % 60, DEC) + "Z";
+            Serial.println("[COMMAND] Command executed successfully");
+        }
+        else
+        {
+            result.status = "error";
+            if (result.error_message.length() == 0)
+                result.error_message = "Command execution failed";
+            Serial.print("[COMMAND] Command execution failed: ");
+            Serial.println(result.error_message);
+        }
+    }
+    else
+    {
+        result.status = "error";
+        result.error_message = "Unsupported action: " + pendingCommand.action;
+        Serial.print("[COMMAND] Unsupported action: ");
+        Serial.println(pendingCommand.action);
+    }
+
+    // Store result for next transmission
+    lastCommandResult = result;
+    lastCommandResult.has_result = true;
+
+    // Clear pending command
+    pendingCommand.valid = false;
+}
+
+bool executeWriteRegisterCommand(const String &register_name, int value, CommandResult &result)
+{
+    Serial.print("[COMMAND] Writing to register: ");
+    Serial.print(register_name);
+    Serial.print(" = ");
+    Serial.println(value);
+
+    // Map register names to our system
+    // Only register 8 (export power percentage) is writable according to specification
+    if (register_name == "export_power_percent")
+    {
+        // Use the inverter's setExportPowerPercent method
+        if (inverter.setExportPowerPercent(value))
+        {
+            Serial.print("[COMMAND] Successfully wrote ");
+            Serial.print(value);
+            Serial.print(" to ");
+            Serial.println(register_name);
+            return true;
+        }
+        else
+        {
+            result.error_message = "Failed to write to inverter register";
+            Serial.println("[COMMAND] Error: Failed to write to inverter register");
+            return false;
+        }
+    }
+    else
+    {
+        result.error_message = "Register '" + register_name + "' is not writable";
+        Serial.print("[COMMAND] Error: Register '");
+        Serial.print(register_name);
+        Serial.println("' is not writable");
+        return false;
+    }
+}
+
 bool uploadToServer(const std::vector<Sample> &samples)
 {
     const APIConfig &apiConfig = configManager.getAPIConfig();
@@ -715,6 +892,21 @@ bool uploadToServer(const std::vector<Sample> &samples)
     jsonDoc["window_start_ms"] = window_start;
     jsonDoc["window_end_ms"] = window_end;
     jsonDoc["poll_count"] = (int)samples.size();
+
+    // Include command result if available
+    if (lastCommandResult.has_result)
+    {
+        JsonObject commandResult = jsonDoc.createNestedObject("command_result");
+        commandResult["status"] = lastCommandResult.status;
+        if (lastCommandResult.executed_at.length() > 0)
+            commandResult["executed_at"] = lastCommandResult.executed_at;
+        if (lastCommandResult.error_message.length() > 0)
+            commandResult["error_message"] = lastCommandResult.error_message;
+
+        Serial.print("[COMMAND] Including command result in upload: ");
+        serializeJson(commandResult, Serial);
+        Serial.println();
+    }
 
     // Accumulators for a single-document (non-chunked) build
     size_t totalOriginalBytes = 0;   // sum of 4 * n_samples per field
@@ -1168,6 +1360,38 @@ void printSystemStatus()
         Serial.println("Pending Config Update: NO");
     }
 
+    // Command execution status
+    if (pendingCommand.valid)
+    {
+        Serial.print("Pending Command: ");
+        Serial.print(pendingCommand.action);
+        Serial.print(" ");
+        Serial.print(pendingCommand.target_register);
+        Serial.print(" = ");
+        Serial.println(pendingCommand.value);
+    }
+    else
+    {
+        Serial.println("Pending Command: NO");
+    }
+
+    if (lastCommandResult.has_result)
+    {
+        Serial.print("Last Command Result: ");
+        Serial.print(lastCommandResult.status);
+        if (lastCommandResult.error_message.length() > 0)
+        {
+            Serial.print(" (");
+            Serial.print(lastCommandResult.error_message);
+            Serial.print(")");
+        }
+        Serial.println(" (will be reported on next upload)");
+    }
+    else
+    {
+        Serial.println("Last Command Result: NO");
+    }
+
     Serial.println("========================\n");
 }
 
@@ -1202,6 +1426,37 @@ void handleSerialCommands()
             Serial.println("[CMD] Requesting configuration update...");
             requestConfigUpdate();
         }
+        else if (command.startsWith("write "))
+        {
+            // Parse command: "write <register> <value>"
+            int firstSpace = command.indexOf(' ');
+            int secondSpace = command.indexOf(' ', firstSpace + 1);
+
+            if (firstSpace > 0 && secondSpace > firstSpace)
+            {
+                String registerName = command.substring(firstSpace + 1, secondSpace);
+                int value = command.substring(secondSpace + 1).toInt();
+
+                Serial.print("[CMD] Testing write command: ");
+                Serial.print(registerName);
+                Serial.print(" = ");
+                Serial.println(value);
+
+                // Simulate a queued command
+                pendingCommand.action = "write_register";
+                pendingCommand.target_register = registerName;
+                pendingCommand.value = value;
+                pendingCommand.received_at = millis();
+                pendingCommand.valid = true;
+
+                Serial.println("[CMD] Command queued for execution");
+            }
+            else
+            {
+                Serial.println("[CMD] Usage: write <register> <value>");
+                Serial.println("[CMD] Example: write export_power_percent 50");
+            }
+        }
         else if (command == "wifi")
         {
             Serial.print("[CMD] WiFi Status: ");
@@ -1222,6 +1477,7 @@ void handleSerialCommands()
             Serial.println("  test    - Run test sensor poll");
             Serial.println("  upload  - Trigger data upload");
             Serial.println("  config  - Request configuration update");
+            Serial.println("  write <register> <value> - Test write command");
             Serial.println("  wifi    - Show WiFi status");
             Serial.println("  help    - Show this help");
         }

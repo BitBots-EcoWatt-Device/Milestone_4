@@ -151,6 +151,76 @@ You can trigger a manual configuration request using the serial command:
 config
 ```
 
+## Command Execution
+
+The ESP8266 firmware implements a command execution system that allows the EcoWatt Cloud to queue write commands for execution on the inverter.
+
+### Command Execution Flow
+
+1. **Cloud Queues Command** - EcoWatt Cloud queues a write command
+2. **Device Receives Command** - At the next configuration request, the device receives the queued command
+3. **Command Execution** - The device immediately executes the command on the Inverter SIM
+4. **Result Reporting** - At the next upload cycle, the device reports the execution result back to EcoWatt Cloud
+
+### Command Message Format
+
+**Cloud → Device Command:**
+
+```json
+{
+  "command": {
+    "action": "write_register",
+    "target_register": "export_power_percent",
+    "value": 75
+  }
+}
+```
+
+**Device → Cloud Execution Result:**
+
+```json
+{
+  "command_result": {
+    "status": "success",
+    "executed_at": "2025-10-10T14:12:00Z"
+  }
+}
+```
+
+Or in case of error:
+
+```json
+{
+  "command_result": {
+    "status": "error",
+    "error_message": "Register 'invalid_reg' is not writable"
+  }
+}
+```
+
+### Supported Commands
+
+- **Action**: `write_register` (only action currently supported)
+- **Writable Registers**:
+  - `export_power_percent` - Set export power percentage (0-100)
+
+### Command Execution Timing
+
+- Commands are received during configuration request cycles (every 5 minutes)
+- Commands are executed immediately when received
+- Execution results are included in the next data upload
+- Results are cleared after successful upload
+
+### Manual Command Testing
+
+You can test command execution using the serial interface:
+
+```
+write export_power_percent 50
+```
+
+This will queue a test command for immediate execution.
+
 ## Serial Commands
 
 Connect to the serial monitor at 115200 baud to use these commands:
@@ -160,6 +230,7 @@ Connect to the serial monitor at 115200 baud to use these commands:
 - `test` - Run a test sensor poll
 - `upload` - Trigger immediate data upload
 - `config` - Request configuration update from cloud
+- `write <register> <value>` - Test write command execution
 - `wifi` - Show WiFi connection status
 - `help` - Show available commands
 
