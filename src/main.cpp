@@ -1,57 +1,6 @@
 /*
  * BitBots EcoWatt ESP8266 Firmware
  *
- * Remote Configuration Implementation:
- * This firmware implements the new Remote Configuration Message Format Specification.
- * The device sends periodic configuration requests to the cloud and receives updates.
- *
- * Device → Cloud Configuration Request:
- * {
- *   "device_id": "EcoWatt001",
- *   "status": "ready"
- * }
- *
- * Cloud → Device Configuration Update:
- * {
- *   "config_update": {
- *     "sampling_interval": 5,
- *     "registers": ["voltage", "current", "frequency"]
- *   }
- * }
- *
- * Device → Cloud Acknowledgment:
- * {
- *   "config_ack": {
- *     "accepted": ["sampling_interval", "registers"],
- *     "rejected": [],
- *     "unchanged": []
- *   }
- * }
- *
- * Command Execution Implementation:
- * This firmware also implements command execution flow for write operations.
- *
- * Cloud → Device Command:
- * {
- *   "command": {
- *     "action": "write_register",
- *     "target_register": "export_power_percent",
- *     "value": 75
- *   }
- * }
- *
- * Device → Cloud Result:
- * {
- *   "command_result": {
- *     "status": "success",
- *     "executed_at": "2025-10-10T14:12:00Z"
- *   }
- * }
- *
- * Configuration requests are sent every 5 minutes (configurable).
- * All configuration changes take effect after the next upload cycle without reboot.
- * Commands are executed immediately and results reported on next upload.
- * Changes are persisted to EEPROM to survive power cycles.
  */
 
 #include <Arduino.h>
@@ -66,6 +15,7 @@
 #include "ESP8266DataTypes.h"
 #include "ESP8266PollingConfig.h"
 #include "ESP8266Compression.h"
+#include "ESP8266Security.h"
 
 // Global objects
 ESP8266Inverter inverter;
@@ -219,11 +169,10 @@ void loop()
     }
     lastLoopTime = currentTime;
 
-    // Small delay to prevent watchdog reset
     // Check for deferred tasks set by timers
     if (pollPending)
     {
-        // clear flag before executing to avoid missing new requests
+        // Clear flag before executing to avoid missing new requests
         pollPending = false;
         pollSensors();
     }
@@ -579,16 +528,16 @@ bool sendConfigRequest()
     requestDoc["device_id"] = WiFi.hostname();
     requestDoc["status"] = "ready";
 
-    String payload;
-    serializeJson(requestDoc, payload);
+    // Add security features encryption, signing, etc. as needed here
+    String securePayload = ESP8266Security::createSecureWrapper(requestDoc);
 
     Serial.print("[HTTP] Config request payload: ");
-    Serial.println(payload);
+    Serial.println(securePayload);
 
     const int maxAttempts = 2;
     for (int attempt = 0; attempt < maxAttempts; attempt++)
     {
-        int code = httpClient.POST(payload);
+        int code = httpClient.POST(securePayload);
         if (code > 0)
         {
             String response = httpClient.getString();
@@ -1014,7 +963,7 @@ bool uploadToServer(const std::vector<Sample> &samples)
     httpClient.addHeader("Content-Type", "application/json");
     httpClient.setTimeout(apiConfig.timeout_ms);
 
-    // Build payload expected by Flask app.py with compression + aggregation
+    // Build payload expected by frontend with compression + aggregation
     DynamicJsonDocument jsonDoc(8192);
     // Session/window metadata
     static uint32_t session_counter = 0;
@@ -1249,6 +1198,13 @@ bool uploadToServer(const std::vector<Sample> &samples)
         }
         return false;
     };
+
+    // Add security features encryption, signing, etc. as needed here
+    String securePayload = ESP8266Security::createSecureWrapper(jsonDoc);
+
+    // Assign existing doc to parsed secure payload
+    jsonDoc.clear();
+    deserializeJson(jsonDoc, securePayload);
 
     // If the single doc is too large, chunk by fields
     String firstPayload;

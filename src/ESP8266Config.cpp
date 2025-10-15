@@ -56,10 +56,14 @@ void ConfigManager::loadDefaults()
     // API defaults
     strcpy(config_.api.api_key, "NjhhZWIwNDU1ZDdmMzg3MzNiMTQ5YTFjOjY4YWViMDQ1NWQ3ZjM4NzMzYjE0OWExMg==");
     strcpy(config_.api.read_url, "http://20.15.114.131:8080/api/inverter/read");
-    strcpy(config_.api.write_url,"http://20.15.114.131:8080/api/inverter/write");
-    strcpy(config_.api.upload_url,"http://10.238.139.170:5001/upload");
-    strcpy(config_.api.config_url,"http://10.238.139.170:5001/config");
+    strcpy(config_.api.write_url, "http://20.15.114.131:8080/api/inverter/write");
+    strcpy(config_.api.upload_url, "http://10.238.139.170:5001/upload");
+    strcpy(config_.api.config_url, "http://10.238.139.170:5001/config");
     config_.api.timeout_ms = 5000;
+
+    // Security defaults
+    strcpy(config_.security.psk, "E5A3C8B2F0D9E8A1C5B3A2D8F0E9C4B2A1D8E5C3B0A9F8E2D1C0B7A6F5E4D3C2");
+    config_.security.nonce = 0; // The counter always starts at 0
 
     // Device defaults
     config_.device.slave_address = 0x11;
@@ -134,4 +138,16 @@ void ConfigManager::updatePollingConfig(uint16_t new_interval, const std::vector
     {
         config_.device.enabled_params[i] = new_params[i];
     }
+}
+
+uint32_t ConfigManager::getNextNonce()
+{
+    // Increment the nonce value in the configuration object
+    config_.security.nonce++;
+
+    // Immediately save the entire configuration to EEPROM to persist the new nonce
+    saveConfig();
+
+    // Return the new nonce that should be used for the current message
+    return config_.security.nonce;
 }
