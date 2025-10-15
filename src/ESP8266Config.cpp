@@ -57,7 +57,8 @@ void ConfigManager::loadDefaults()
     strcpy(config_.api.api_key, "NjhhZWIwNDU1ZDdmMzg3MzNiMTQ5YTFjOjY4YWViMDQ1NWQ3ZjM4NzMzYjE0OWExMg==");
     strcpy(config_.api.read_url, "http://20.15.114.131:8080/api/inverter/read");
     strcpy(config_.api.write_url,"http://20.15.114.131:8080/api/inverter/write");
-    strcpy(config_.api.upload_url,"http://10.238.139.181:5000/upload");
+    strcpy(config_.api.upload_url,"http://10.238.139.170:5001/upload");
+    strcpy(config_.api.config_url,"http://10.238.139.170:5001/config");
     config_.api.timeout_ms = 5000;
 
     // Device defaults

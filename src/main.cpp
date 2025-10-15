@@ -179,8 +179,8 @@ void setup()
         pollTicker.attach_ms(deviceConfig.poll_interval_ms, onPollTimer);
         uploadTicker.attach_ms(deviceConfig.upload_interval_ms, onUploadTimer);
 
-        // Start configuration request timer (every 5 minutes)
-        configRequestTicker.attach_ms(300000, onConfigRequestTimer);
+        // Start configuration request timer (every 5 seconds)
+        configRequestTicker.attach_ms(5000, onConfigRequestTimer);
 
         Serial.println("[MAIN] System initialized successfully");
         printSystemStatus();
@@ -1459,7 +1459,7 @@ void printSystemStatus()
     Serial.print(configManager.getDeviceConfig().upload_interval_ms);
     Serial.println(" ms");
 
-    Serial.println("Config Request Interval: 300000 ms (5 minutes)");
+    Serial.println("Config Request Interval: 5000 ms (5 seconds)");
 
     // Pending configuration status
     if (pendingConfigurationUpdate)
