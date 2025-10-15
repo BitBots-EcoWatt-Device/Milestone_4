@@ -16,7 +16,7 @@ public:
     // Set the Modbus slave address from configuration
     void setSlaveAddress(uint8_t slaveAddr);
 
-    // Unified read method using parameter descriptor table
+    // New unified read method using parameter descriptor table
     bool read(ParameterType id, float &out);
 
     // Individual register read operations (legacy, now thin wrappers)

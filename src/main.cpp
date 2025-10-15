@@ -59,6 +59,7 @@
 #include <ESP8266HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Ticker.h>
+#include <time.h>
 
 #include "ESP8266Config.h"
 #include "ESP8266Inverter.h"
@@ -244,6 +245,58 @@ bool initializeSystem()
     if (!configManager.begin())
     {
         Serial.println("[INIT] Failed to load configuration, using defaults");
+    }
+
+    // Initialize WiFi connection
+    const WiFiConfig &wifiConfig = configManager.getWiFiConfig();
+    WiFi.mode(WIFI_STA);
+    WiFi.hostname(wifiConfig.hostname);
+    WiFi.begin(wifiConfig.ssid, wifiConfig.password);
+
+    Serial.print("[INIT] Connecting to WiFi: ");
+    Serial.println(wifiConfig.ssid);
+
+    int wifi_timeout = 0;
+    while (WiFi.status() != WL_CONNECTED && wifi_timeout < 30)
+    {
+        delay(1000);
+        Serial.print(".");
+        wifi_timeout++;
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        Serial.print("[INIT] WiFi connected! IP: ");
+        Serial.println(WiFi.localIP());
+
+        // Configure time synchronization
+        configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+        Serial.println("[INIT] Time synchronization configured");
+
+        // Wait for time sync
+        time_t now = time(nullptr);
+        int sync_timeout = 0;
+        while (now < 8 * 3600 * 2 && sync_timeout < 10)
+        {
+            delay(1000);
+            now = time(nullptr);
+            sync_timeout++;
+        }
+
+        if (now >= 8 * 3600 * 2)
+        {
+            Serial.println("[INIT] Time synchronized successfully");
+        }
+        else
+        {
+            Serial.println("[INIT] Warning: Time synchronization may not be complete");
+        }
+    }
+    else
+    {
+        Serial.println("[INIT] Error: Failed to connect to WiFi");
+        return false;
     }
 
     // Configure inverter with slave address from configuration
@@ -544,16 +597,30 @@ bool sendConfigRequest()
                         uint16_t newInterval = 0;
                         std::vector<ParameterType> newParams;
 
+                        // Get current configuration for comparison
+                        const DeviceConfig &currentConfig = configManager.getDeviceConfig();
+
                         // Parse sampling_interval
                         if (configUpdate.containsKey("sampling_interval"))
                         {
                             newInterval = configUpdate["sampling_interval"] | 0;
                             if (newInterval > 0 && newInterval >= 1000 && newInterval <= 60000)
                             {
-                                acceptedParams.push_back("sampling_interval");
-                                Serial.print("[CONFIG] New sampling interval: ");
-                                Serial.print(newInterval);
-                                Serial.println(" ms");
+                                // Check if the value is actually different from current
+                                if (newInterval != currentConfig.poll_interval_ms)
+                                {
+                                    acceptedParams.push_back("sampling_interval");
+                                    Serial.print("[CONFIG] New sampling interval: ");
+                                    Serial.print(newInterval);
+                                    Serial.println(" ms");
+                                }
+                                else
+                                {
+                                    unchangedParams.push_back("sampling_interval");
+                                    Serial.print("[CONFIG] Sampling interval unchanged: ");
+                                    Serial.print(newInterval);
+                                    Serial.println(" ms");
+                                }
                             }
                             else
                             {
@@ -594,7 +661,7 @@ bool sendConfigRequest()
                                         paramType = ParameterType::PV1_CURRENT;
                                     else if (regStr == "pv2_current")
                                         paramType = ParameterType::PV2_CURRENT;
-                                    else if (regStr == "export_power_percent")
+                                    else if (regStr == "output_power_percentage")
                                         paramType = ParameterType::EXPORT_POWER_PERCENT;
                                     else
                                     {
@@ -612,7 +679,44 @@ bool sendConfigRequest()
 
                                 if (registersValid && !newParams.empty())
                                 {
-                                    acceptedParams.push_back("registers");
+                                    // Check if the registers have actually changed
+                                    bool registersChanged = false;
+                                    if (newParams.size() != currentConfig.num_enabled_params)
+                                    {
+                                        registersChanged = true;
+                                    }
+                                    else
+                                    {
+                                        // Check if any parameters are different
+                                        for (size_t i = 0; i < newParams.size(); i++)
+                                        {
+                                            bool found = false;
+                                            for (uint8_t j = 0; j < currentConfig.num_enabled_params; j++)
+                                            {
+                                                if (newParams[i] == currentConfig.enabled_params[j])
+                                                {
+                                                    found = true;
+                                                    break;
+                                                }
+                                            }
+                                            if (!found)
+                                            {
+                                                registersChanged = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    if (registersChanged)
+                                    {
+                                        acceptedParams.push_back("registers");
+                                        Serial.println("[CONFIG] Registers configuration will be updated");
+                                    }
+                                    else
+                                    {
+                                        unchangedParams.push_back("registers");
+                                        Serial.println("[CONFIG] Registers configuration unchanged");
+                                    }
                                 }
                                 else
                                 {
@@ -674,6 +778,10 @@ bool sendConfigRequest()
                                 rejectedParams.insert(rejectedParams.end(), acceptedParams.begin(), acceptedParams.end());
                                 acceptedParams.clear();
                             }
+                        }
+                        else if (acceptedParams.empty() && unchangedParams.empty() && rejectedParams.empty())
+                        {
+                            Serial.println("[CONFIG] No configuration parameters found in update");
                         }
                         else if (!acceptedParams.empty())
                         {
@@ -796,16 +904,19 @@ void executeCommand()
         if (executeWriteRegisterCommand(pendingCommand.target_register, pendingCommand.value, result))
         {
             result.status = "success";
-            // Generate ISO8601 timestamp
-            unsigned long currentTime = millis();
-            result.executed_at = "2025-10-10T" + String((currentTime / 3600000) % 24, DEC) + ":" +
-                                 String((currentTime / 60000) % 60, DEC) + ":" +
-                                 String((currentTime / 1000) % 60, DEC) + "Z";
+            // Generate proper ISO8601 timestamp
+            // Since ESP8266 doesn't have RTC, we'll use a simplified timestamp
+            // In production, you would sync with NTP or use the timestamp from the server
+            time_t now = time(nullptr);
+            struct tm *timeinfo = gmtime(&now);
+            char timestamp[25];
+            strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", timeinfo);
+            result.executed_at = String(timestamp);
             Serial.println("[COMMAND] Command executed successfully");
         }
         else
         {
-            result.status = "error";
+            result.status = "failure";
             if (result.error_message.length() == 0)
                 result.error_message = "Command execution failed";
             Serial.print("[COMMAND] Command execution failed: ");
@@ -814,7 +925,7 @@ void executeCommand()
     }
     else
     {
-        result.status = "error";
+        result.status = "failure";
         result.error_message = "Unsupported action: " + pendingCommand.action;
         Serial.print("[COMMAND] Unsupported action: ");
         Serial.println(pendingCommand.action);
@@ -837,7 +948,7 @@ bool executeWriteRegisterCommand(const String &register_name, int value, Command
 
     // Map register names to our system
     // Only register 8 (export power percentage) is writable according to specification
-    if (register_name == "export_power_percent")
+    if (register_name == "output_power_percentage" || register_name == "export_power_percent")
     {
         // Use the inverter's setExportPowerPercent method
         if (inverter.setExportPowerPercent(value))
@@ -1426,6 +1537,38 @@ void handleSerialCommands()
             Serial.println("[CMD] Requesting configuration update...");
             requestConfigUpdate();
         }
+        else if (command == "test-config")
+        {
+            Serial.println("[CMD] Testing configuration parsing...");
+            // Test configuration parsing with the specified format
+            StaticJsonDocument<512> testDoc;
+            JsonObject configUpdate = testDoc.createNestedObject("config_update");
+            configUpdate["sampling_interval"] = 5000;
+            JsonArray registers = configUpdate.createNestedArray("registers");
+            registers.add("voltage");
+            registers.add("current");
+            registers.add("frequency");
+
+            String testJson;
+            serializeJson(testDoc, testJson);
+            Serial.print("[CMD] Test config JSON: ");
+            Serial.println(testJson);
+        }
+        else if (command == "test-command")
+        {
+            Serial.println("[CMD] Testing command parsing...");
+            // Test command parsing with the specified format
+            StaticJsonDocument<256> testDoc;
+            JsonObject cmd = testDoc.createNestedObject("command");
+            cmd["action"] = "write_register";
+            cmd["target_register"] = "output_power_percentage";
+            cmd["value"] = 80;
+
+            String testJson;
+            serializeJson(testDoc, testJson);
+            Serial.print("[CMD] Test command JSON: ");
+            Serial.println(testJson);
+        }
         else if (command.startsWith("write "))
         {
             // Parse command: "write <register> <value>"
@@ -1454,7 +1597,7 @@ void handleSerialCommands()
             else
             {
                 Serial.println("[CMD] Usage: write <register> <value>");
-                Serial.println("[CMD] Example: write export_power_percent 50");
+                Serial.println("[CMD] Example: write output_power_percentage 50");
             }
         }
         else if (command == "wifi")
@@ -1477,6 +1620,8 @@ void handleSerialCommands()
             Serial.println("  test    - Run test sensor poll");
             Serial.println("  upload  - Trigger data upload");
             Serial.println("  config  - Request configuration update");
+            Serial.println("  test-config - Test configuration JSON parsing");
+            Serial.println("  test-command - Test command JSON parsing");
             Serial.println("  write <register> <value> - Test write command");
             Serial.println("  wifi    - Show WiFi status");
             Serial.println("  help    - Show this help");
