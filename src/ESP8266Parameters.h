@@ -14,8 +14,8 @@ struct ParamDesc
     float scale;
 };
 
-// Global parameter descriptor table (stored in flash)
-extern const ParamDesc kParams[] PROGMEM;
+// Global parameter descriptor table
+extern const ParamDesc kParams[];
 extern const size_t kParamsCount;
 
 // Helper functions
