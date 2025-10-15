@@ -90,9 +90,21 @@ struct CommandResult
     bool has_result;
 };
 
+// Configuration acknowledgment structure
+struct ConfigAck
+{
+    std::vector<String> accepted;
+    std::vector<String> rejected;
+    std::vector<String> unchanged;
+    bool has_ack;
+};
+
 // Command execution state
 PendingCommand pendingCommand = {"", "", 0, 0, false};
 CommandResult lastCommandResult = {"", "", "", false};
+
+// Configuration acknowledgment state
+ConfigAck lastConfigAck = {{}, {}, {}, false};
 
 // Timers
 Ticker pollTicker;
@@ -484,6 +496,16 @@ void uploadData()
             lastCommandResult.has_result = false;
         }
 
+        // Clear config acknowledgment after successful upload
+        if (lastConfigAck.has_ack)
+        {
+            Serial.println("[CONFIG] Configuration acknowledgment successfully reported to cloud");
+            lastConfigAck.has_ack = false;
+            lastConfigAck.accepted.clear();
+            lastConfigAck.rejected.clear();
+            lastConfigAck.unchanged.clear();
+        }
+
         // Apply pending configuration changes after successful upload
         if (pendingConfigurationUpdate)
         {
@@ -788,32 +810,34 @@ bool sendConfigRequest()
                             Serial.println("[CONFIG] Configuration update rejected due to validation errors");
                         }
 
-                        // Send acknowledgment response
-                        StaticJsonDocument<512> ackDoc;
-                        JsonObject configAck = ackDoc.createNestedObject("config_ack");
+                        // Store acknowledgment for next upload instead of sending immediately
+                        lastConfigAck.accepted.clear();
+                        lastConfigAck.rejected.clear();
+                        lastConfigAck.unchanged.clear();
 
-                        JsonArray acceptedArray = configAck.createNestedArray("accepted");
                         for (const String &param : acceptedParams)
                         {
-                            acceptedArray.add(param);
+                            lastConfigAck.accepted.push_back(param);
                         }
 
-                        JsonArray rejectedArray = configAck.createNestedArray("rejected");
                         for (const String &param : rejectedParams)
                         {
-                            rejectedArray.add(param);
+                            lastConfigAck.rejected.push_back(param);
                         }
 
-                        JsonArray unchangedArray = configAck.createNestedArray("unchanged");
                         for (const String &param : unchangedParams)
                         {
-                            unchangedArray.add(param);
+                            lastConfigAck.unchanged.push_back(param);
                         }
 
-                        String ackPayload;
-                        serializeJson(ackDoc, ackPayload);
-                        Serial.print("[CONFIG] Sending acknowledgment: ");
-                        Serial.println(ackPayload);
+                        lastConfigAck.has_ack = true;
+
+                        Serial.print("[CONFIG] Configuration acknowledgment prepared for next upload: accepted=");
+                        Serial.print(acceptedParams.size());
+                        Serial.print(", rejected=");
+                        Serial.print(rejectedParams.size());
+                        Serial.print(", unchanged=");
+                        Serial.println(unchangedParams.size());
 
                         httpClient.end();
                         return true;
@@ -1016,6 +1040,34 @@ bool uploadToServer(const std::vector<Sample> &samples)
 
         Serial.print("[COMMAND] Including command result in upload: ");
         serializeJson(commandResult, Serial);
+        Serial.println();
+    }
+
+    // Include config acknowledgment if available
+    if (lastConfigAck.has_ack)
+    {
+        JsonObject configAck = jsonDoc.createNestedObject("config_ack");
+
+        JsonArray acceptedArray = configAck.createNestedArray("accepted");
+        for (const String &param : lastConfigAck.accepted)
+        {
+            acceptedArray.add(param);
+        }
+
+        JsonArray rejectedArray = configAck.createNestedArray("rejected");
+        for (const String &param : lastConfigAck.rejected)
+        {
+            rejectedArray.add(param);
+        }
+
+        JsonArray unchangedArray = configAck.createNestedArray("unchanged");
+        for (const String &param : lastConfigAck.unchanged)
+        {
+            unchangedArray.add(param);
+        }
+
+        Serial.print("[CONFIG] Including config acknowledgment in upload: ");
+        serializeJson(configAck, Serial);
         Serial.println();
     }
 
