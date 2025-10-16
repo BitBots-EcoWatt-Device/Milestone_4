@@ -57,13 +57,22 @@ void ConfigManager::loadDefaults()
     strcpy(config_.api.api_key, "NjhhZWIwNDU1ZDdmMzg3MzNiMTQ5YTFjOjY4YWViMDQ1NWQ3ZjM4NzMzYjE0OWExMg==");
     strcpy(config_.api.read_url, "http://20.15.114.131:8080/api/inverter/read");
     strcpy(config_.api.write_url, "http://20.15.114.131:8080/api/inverter/write");
-    strcpy(config_.api.upload_url, "http://10.238.139.170:5001/upload");
-    strcpy(config_.api.config_url, "http://10.238.139.170:5001/config");
+    strcpy(config_.api.upload_url, "http://10.238.139.181:5001/upload");
+    strcpy(config_.api.config_url, "http://10.238.139.181:5001/config");
     config_.api.timeout_ms = 5000;
 
     // Security defaults
     strcpy(config_.security.psk, "E5A3C8B2F0D9E8A1C5B3A2D8F0E9C4B2A1D8E5C3B0A9F8E2D1C0B7A6F5E4D3C2");
     config_.security.nonce = 0; // The counter always starts at 0
+
+    // Boot status defaults
+    config_.boot_status.ota_reboot_pending = false;
+    config_.boot_status.boot_success_reported = false;
+    strcpy(config_.boot_status.last_boot_status, "success");
+    strcpy(config_.boot_status.boot_error_message, "");
+
+    // Firmware version default
+    strcpy(config_.firmware_version, "1.0.0");
 
     // Device defaults
     config_.device.slave_address = 0x11;
@@ -123,6 +132,12 @@ void ConfigManager::setDeviceConfig(uint8_t slave_addr, uint16_t poll_interval, 
     config_.device.buffer_size = buffer_size;
 }
 
+void ConfigManager::setFirmwareVersion(const char *version)
+{
+    strncpy(config_.firmware_version, version, sizeof(config_.firmware_version) - 1);
+    config_.firmware_version[sizeof(config_.firmware_version) - 1] = '\0';
+}
+
 bool ConfigManager::isConfigValid() const
 {
     return config_.magic == CONFIG_MAGIC &&
@@ -150,4 +165,51 @@ uint32_t ConfigManager::getNextNonce()
 
     // Return the new nonce that should be used for the current message
     return config_.security.nonce;
+}
+
+// Boot status management methods
+void ConfigManager::setOTARebootFlag(bool pending)
+{
+    config_.boot_status.ota_reboot_pending = pending;
+    config_.boot_status.boot_success_reported = false;
+    if (pending)
+    {
+        strcpy(config_.boot_status.last_boot_status, "rebooting");
+        strcpy(config_.boot_status.boot_error_message, "");
+    }
+    saveConfig();
+}
+
+void ConfigManager::setBootStatus(const char *status, const char *error_message)
+{
+    strncpy(config_.boot_status.last_boot_status, status, sizeof(config_.boot_status.last_boot_status) - 1);
+    config_.boot_status.last_boot_status[sizeof(config_.boot_status.last_boot_status) - 1] = '\0';
+    
+    if (error_message)
+    {
+        strncpy(config_.boot_status.boot_error_message, error_message, sizeof(config_.boot_status.boot_error_message) - 1);
+        config_.boot_status.boot_error_message[sizeof(config_.boot_status.boot_error_message) - 1] = '\0';
+    }
+    else
+    {
+        config_.boot_status.boot_error_message[0] = '\0';
+    }
+    
+    config_.boot_status.boot_success_reported = false;
+    saveConfig();
+}
+
+void ConfigManager::markBootSuccessReported()
+{
+    config_.boot_status.boot_success_reported = true;
+    config_.boot_status.ota_reboot_pending = false;
+    saveConfig();
+}
+
+bool ConfigManager::needsBootStatusReport() const
+{
+    // Report boot status if:
+    // 1. OTA reboot was pending and we successfully booted (status changed to success)
+    // 2. Boot success hasn't been reported yet
+    return config_.boot_status.ota_reboot_pending || !config_.boot_status.boot_success_reported;
 }

@@ -16,11 +16,14 @@
 #include "ESP8266PollingConfig.h"
 #include "ESP8266Compression.h"
 #include "ESP8266Security.h"
+#include "ESP8266FOTA.h"
+#include <LittleFS.h>
 
 // Global objects
 ESP8266Inverter inverter;
 ESP8266DataBuffer dataBuffer(10); // Smaller buffer for ESP8266
 ESP8266PollingConfig pollingConfig;
+ESP8266FOTA fota;
 
 // Command execution structures
 struct PendingCommand
@@ -76,6 +79,7 @@ void requestConfigUpdate();
 void executeCommand();
 void setupPollingConfig();
 void applyNewConfiguration();
+void updateConfigPollingRate();
 void printSystemStatus();
 void handleSerialCommands();
 bool uploadToServer(const std::vector<Sample> &samples);
@@ -102,6 +106,9 @@ static uint32_t crc32_calc(const uint8_t *data, size_t len)
 volatile bool pollPending = false;
 volatile bool uploadPending = false;
 volatile bool configRequestPending = false;
+
+// Dynamic config polling interval tracking
+unsigned long currentConfigPollingInterval = 5000;
 
 void IRAM_ATTR onPollTimer()
 {
@@ -133,6 +140,19 @@ void setup()
 
     if (systemInitialized)
     {
+        // Check if we just rebooted from an OTA update
+        if (configManager.getBootStatusConfig().ota_reboot_pending)
+        {
+            Serial.println("[BOOT] Detected successful OTA reboot");
+            configManager.setBootStatus("success", "");
+        }
+        else if (!configManager.getBootStatusConfig().boot_success_reported)
+        {
+            Serial.println("[BOOT] Setting boot status to success");
+            configManager.setBootStatus("success", "");
+        }
+
+        fota.begin();
         setupPollingConfig();
 
         // Start polling and upload timers
@@ -150,6 +170,7 @@ void setup()
     else
     {
         Serial.println("[MAIN] System initialization failed!");
+        configManager.setBootStatus("failure", "System initialization failed");
     }
 }
 
@@ -188,6 +209,9 @@ void loop()
         configRequestPending = false;
         requestConfigUpdate();
     }
+
+    // Update config polling rate based on FOTA status
+    updateConfigPollingRate();
 
     // Execute pending commands
     if (pendingCommand.valid)
@@ -309,6 +333,43 @@ void applyNewConfiguration()
     Serial.print("[CONFIG] New polling interval: ");
     Serial.print(deviceConfig.poll_interval_ms);
     Serial.println(" ms");
+}
+
+void updateConfigPollingRate()
+{
+    // Check if FOTA just started - if so, immediately request next chunk
+    if (fota.justStartedUpdate())
+    {
+        Serial.println("[FOTA] FOTA update started - triggering immediate config request");
+        configRequestPending = true;
+        fota.clearJustStartedFlag();  // Clear the flag after triggering immediate request
+    }
+    
+    // Get the recommended polling interval from FOTA
+    unsigned long recommendedInterval = fota.getRecommendedPollingInterval();
+    
+    // Only update if the interval has changed to avoid unnecessary timer resets
+    if (recommendedInterval != currentConfigPollingInterval)
+    {
+        currentConfigPollingInterval = recommendedInterval;
+        
+        // Update the configuration request timer
+        configRequestTicker.detach();
+        configRequestTicker.attach_ms(currentConfigPollingInterval, onConfigRequestTimer);
+        
+        if (fota.needsFastPolling())
+        {
+            Serial.print("[FOTA] Switching to fast polling: ");
+            Serial.print(currentConfigPollingInterval);
+            Serial.println(" ms");
+        }
+        else
+        {
+            Serial.print("[CONFIG] Reverting to normal polling: ");
+            Serial.print(currentConfigPollingInterval);
+            Serial.println(" ms");
+        }
+    }
 }
 
 void pollSensors()
@@ -526,7 +587,31 @@ bool sendConfigRequest()
     // Build device status request as per specification
     StaticJsonDocument<512> requestDoc;
     requestDoc["device_id"] = WiFi.hostname();
+    requestDoc["firmware_version"] = configManager.getFirmwareVersion();
     requestDoc["status"] = "ready";
+
+    // Add boot status if needed
+    if (configManager.needsBootStatusReport())
+    {
+        const BootStatusConfig &bootStatus = configManager.getBootStatusConfig();
+        JsonObject bootData = requestDoc.createNestedObject("boot_data");
+        bootData["status"] = bootStatus.last_boot_status;
+        bootData["firmware_version"] = configManager.getFirmwareVersion();
+        if (strlen(bootStatus.boot_error_message) > 0)
+        {
+            bootData["error_message"] = bootStatus.boot_error_message;
+        }
+        else
+        {
+            bootData["error_message"] = "";
+        }
+        
+        Serial.println("[CONFIG] Adding boot status to config request");
+    }
+
+    // Add FOTA status if there's an ongoing update
+    JsonObject requestObj = requestDoc.as<JsonObject>();
+    fota.addStatusToConfigRequest(requestObj);
 
     // Add security features encryption, signing, etc. as needed here
     String securePayload = ESP8266Security::createSecureWrapper(requestDoc);
@@ -788,6 +873,13 @@ bool sendConfigRequest()
                         Serial.print(", unchanged=");
                         Serial.println(unchangedParams.size());
 
+                        // Mark boot status as reported if we successfully sent it
+                        if (configManager.needsBootStatusReport())
+                        {
+                            configManager.markBootSuccessReported();
+                            Serial.println("[CONFIG] Boot status reported successfully");
+                        }
+
                         httpClient.end();
                         return true;
                     }
@@ -824,13 +916,46 @@ bool sendConfigRequest()
                             Serial.println("[COMMAND] Error: Invalid command format");
                         }
 
+                        // Mark boot status as reported if we successfully sent it
+                        if (configManager.needsBootStatusReport())
+                        {
+                            configManager.markBootSuccessReported();
+                            Serial.println("[CONFIG] Boot status reported successfully");
+                        }
+
+                        httpClient.end();
+                        return true;
+                    }
+                    
+                    
+                    // Process the entire response through FOTA (handles secure wrapper if needed)
+                    String responseStr = response;
+                    if (fota.processSecureFOTAResponse(responseStr))
+                    {
+                        Serial.println("[CONFIG] FOTA processing completed successfully");
+                        
+                        // Mark boot status as reported if we successfully sent it
+                        if (configManager.needsBootStatusReport())
+                        {
+                            configManager.markBootSuccessReported();
+                            Serial.println("[CONFIG] Boot status reported successfully");
+                        }
+                        
                         httpClient.end();
                         return true;
                     }
                     else
                     {
-                        // No configuration update or command available
-                        Serial.println("[CONFIG] No configuration update or command available");
+                        // No configuration update, command, or FOTA available
+                        Serial.println("[CONFIG] No configuration update, command, or FOTA available");
+                        
+                        // Mark boot status as reported if we successfully sent it
+                        if (configManager.needsBootStatusReport())
+                        {
+                            configManager.markBootSuccessReported();
+                            Serial.println("[CONFIG] Boot status reported successfully");
+                        }
+                        
                         httpClient.end();
                         return true;
                     }
@@ -1432,6 +1557,10 @@ void printSystemStatus()
 {
     Serial.println("\n==== SYSTEM STATUS ====");
 
+    // Firmware version
+    Serial.print("Firmware Version: ");
+    Serial.println(configManager.getFirmwareVersion());
+
     // WiFi status
     Serial.print("WiFi Status: ");
     if (WiFi.status() == WL_CONNECTED)
@@ -1510,6 +1639,9 @@ void printSystemStatus()
     {
         Serial.println("Last Command Result: NO");
     }
+
+    // FOTA status
+    fota.printStatus();
 
     Serial.println("========================\n");
 }
@@ -1620,6 +1752,100 @@ void handleSerialCommands()
                 Serial.println(WiFi.RSSI());
             }
         }
+        else if (command == "version")
+        {
+            Serial.print("[CMD] Current firmware version: ");
+            Serial.println(configManager.getFirmwareVersion());
+        }
+        else if (command.startsWith("version "))
+        {
+            // Parse command: "version <new_version>"
+            String newVersion = command.substring(8);
+            newVersion.trim();
+            
+            if (newVersion.length() > 0 && newVersion.length() < 16)
+            {
+                configManager.setFirmwareVersion(newVersion.c_str());
+                if (configManager.saveConfig())
+                {
+                    Serial.print("[CMD] Firmware version updated to: ");
+                    Serial.println(newVersion);
+                }
+                else
+                {
+                    Serial.println("[CMD] Failed to save firmware version");
+                }
+            }
+            else
+            {
+                Serial.println("[CMD] Invalid version format. Use: version <version_string>");
+                Serial.println("[CMD] Example: version 1.1.0");
+            }
+        }
+        else if (command == "fota-status")
+        {
+            fota.printDetailedStatus();
+        }
+        else if (command == "fota-reset")
+        {
+            Serial.println("[CMD] Resetting FOTA status...");
+            fota.reset();
+            Serial.println("[CMD] FOTA status reset complete");
+        }
+        else if (command == "fota-assemble")
+        {
+            Serial.println("[CMD] Manually triggering firmware assembly...");
+            if (fota.isComplete())
+            {
+                // This will be handled by the private assembleFirmware method through a public wrapper
+                Serial.println("[CMD] All chunks received - assembly should happen automatically");
+            }
+            else
+            {
+                Serial.println("[CMD] Error: Not all chunks received yet");
+                fota.printDetailedStatus();
+            }
+        }
+        else if (command == "fota-files")
+        {
+            Serial.println("[CMD] FOTA Files on LittleFS:");
+            Dir dir = LittleFS.openDir("/");
+            int chunkCount = 0;
+            bool hasFirmware = false;
+            
+            while (dir.next())
+            {
+                String fileName = dir.fileName();
+                size_t fileSize = dir.fileSize();
+                
+                if (fileName.startsWith("/fota_"))
+                {
+                    Serial.print("  ");
+                    Serial.print(fileName);
+                    Serial.print(" (");
+                    Serial.print(fileSize);
+                    Serial.println(" bytes)");
+                    
+                    if (fileName.startsWith("/fota_chunk_"))
+                    {
+                        chunkCount++;
+                    }
+                    else if (fileName == "/fota_firmware.bin")
+                    {
+                        hasFirmware = true;
+                    }
+                }
+            }
+            
+            Serial.print("[CMD] Found ");
+            Serial.print(chunkCount);
+            Serial.println(" chunk files");
+            
+            if (hasFirmware)
+            {
+                Serial.println("[CMD] Assembled firmware file exists");
+            }
+        }
         else if (command == "help")
         {
             Serial.println("[CMD] Available commands:");
@@ -1632,6 +1858,12 @@ void handleSerialCommands()
             Serial.println("  test-command - Test command JSON parsing");
             Serial.println("  write <register> <value> - Test write command");
             Serial.println("  wifi    - Show WiFi status");
+            Serial.println("  version - Show current firmware version");
+            Serial.println("  version <new_version> - Set firmware version");
+            Serial.println("  fota-status - Show FOTA update status");
+            Serial.println("  fota-reset - Reset FOTA update state");
+            Serial.println("  fota-assemble - Manually trigger firmware assembly");
+            Serial.println("  fota-files - List FOTA files on filesystem");
             Serial.println("  help    - Show this help");
         }
         else if (command.length() > 0)

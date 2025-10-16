@@ -78,3 +78,34 @@ String ESP8266Security::createSecureWrapper(const String serialized_payload)
 
     return final_secure_payload;
 }
+
+// Base64 utility function implementations
+unsigned int ESP8266Security::getBase64EncodedLength(unsigned int inputLength)
+{
+    return encode_base64_length(inputLength);
+}
+
+unsigned int ESP8266Security::getBase64DecodedLength(const String &base64Data)
+{
+    return decode_base64_length((unsigned char *)base64Data.c_str());
+}
+
+unsigned int ESP8266Security::getBase64DecodedLength(const unsigned char *base64Data, unsigned int length)
+{
+    return decode_base64_length(base64Data, length);
+}
+
+bool ESP8266Security::encodeBase64(const unsigned char *input, unsigned int inputLength, unsigned char *output)
+{
+    return encode_base64(input, inputLength, output) > 0;
+}
+
+bool ESP8266Security::decodeBase64(const String &base64Data, unsigned char *output)
+{
+    return decode_base64((unsigned char *)base64Data.c_str(), output) > 0;
+}
+
+bool ESP8266Security::decodeBase64(const unsigned char *input, unsigned int inputLength, unsigned char *output)
+{
+    return decode_base64(input, inputLength, output) > 0;
+}
