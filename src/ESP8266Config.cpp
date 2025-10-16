@@ -57,13 +57,16 @@ void ConfigManager::loadDefaults()
     strcpy(config_.api.api_key, "NjhhZWIwNDU1ZDdmMzg3MzNiMTQ5YTFjOjY4YWViMDQ1NWQ3ZjM4NzMzYjE0OWExMg==");
     strcpy(config_.api.read_url, "http://20.15.114.131:8080/api/inverter/read");
     strcpy(config_.api.write_url, "http://20.15.114.131:8080/api/inverter/write");
-    strcpy(config_.api.upload_url, "http://10.238.139.170:5001/upload");
-    strcpy(config_.api.config_url, "http://10.238.139.170:5001/config");
+    strcpy(config_.api.upload_url, "http://10.238.139.181:5001/upload");
+    strcpy(config_.api.config_url, "http://10.238.139.181:5001/config");
     config_.api.timeout_ms = 5000;
 
     // Security defaults
     strcpy(config_.security.psk, "E5A3C8B2F0D9E8A1C5B3A2D8F0E9C4B2A1D8E5C3B0A9F8E2D1C0B7A6F5E4D3C2");
     config_.security.nonce = 0; // The counter always starts at 0
+
+    // Firmware version default
+    strcpy(config_.firmware_version, "1.0.0");
 
     // Device defaults
     config_.device.slave_address = 0x11;
@@ -121,6 +124,12 @@ void ConfigManager::setDeviceConfig(uint8_t slave_addr, uint16_t poll_interval, 
     config_.device.poll_interval_ms = poll_interval;
     config_.device.upload_interval_ms = upload_interval;
     config_.device.buffer_size = buffer_size;
+}
+
+void ConfigManager::setFirmwareVersion(const char *version)
+{
+    strncpy(config_.firmware_version, version, sizeof(config_.firmware_version) - 1);
+    config_.firmware_version[sizeof(config_.firmware_version) - 1] = '\0';
 }
 
 bool ConfigManager::isConfigValid() const

@@ -526,6 +526,7 @@ bool sendConfigRequest()
     // Build device status request as per specification
     StaticJsonDocument<512> requestDoc;
     requestDoc["device_id"] = WiFi.hostname();
+    requestDoc["firmware_version"] = configManager.getFirmwareVersion();
     requestDoc["status"] = "ready";
 
     // Add security features encryption, signing, etc. as needed here
@@ -1432,6 +1433,10 @@ void printSystemStatus()
 {
     Serial.println("\n==== SYSTEM STATUS ====");
 
+    // Firmware version
+    Serial.print("Firmware Version: ");
+    Serial.println(configManager.getFirmwareVersion());
+
     // WiFi status
     Serial.print("WiFi Status: ");
     if (WiFi.status() == WL_CONNECTED)
@@ -1620,6 +1625,36 @@ void handleSerialCommands()
                 Serial.println(WiFi.RSSI());
             }
         }
+        else if (command == "version")
+        {
+            Serial.print("[CMD] Current firmware version: ");
+            Serial.println(configManager.getFirmwareVersion());
+        }
+        else if (command.startsWith("version "))
+        {
+            // Parse command: "version <new_version>"
+            String newVersion = command.substring(8);
+            newVersion.trim();
+            
+            if (newVersion.length() > 0 && newVersion.length() < 16)
+            {
+                configManager.setFirmwareVersion(newVersion.c_str());
+                if (configManager.saveConfig())
+                {
+                    Serial.print("[CMD] Firmware version updated to: ");
+                    Serial.println(newVersion);
+                }
+                else
+                {
+                    Serial.println("[CMD] Failed to save firmware version");
+                }
+            }
+            else
+            {
+                Serial.println("[CMD] Invalid version format. Use: version <version_string>");
+                Serial.println("[CMD] Example: version 1.1.0");
+            }
+        }
         else if (command == "help")
         {
             Serial.println("[CMD] Available commands:");
@@ -1632,6 +1667,8 @@ void handleSerialCommands()
             Serial.println("  test-command - Test command JSON parsing");
             Serial.println("  write <register> <value> - Test write command");
             Serial.println("  wifi    - Show WiFi status");
+            Serial.println("  version - Show current firmware version");
+            Serial.println("  version <new_version> - Set firmware version");
             Serial.println("  help    - Show this help");
         }
         else if (command.length() > 0)

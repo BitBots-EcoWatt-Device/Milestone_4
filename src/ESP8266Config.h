@@ -47,6 +47,7 @@ struct ESP8266Config
     APIConfig api;
     DeviceConfig device;
     SecurityConfig security;
+    char firmware_version[16]; // Firmware version string (e.g., "1.0.0")
     uint32_t magic; // For EEPROM validation
 };
 
@@ -65,11 +66,13 @@ public:
     const APIConfig &getAPIConfig() const { return config_.api; }
     const DeviceConfig &getDeviceConfig() const { return config_.device; }
     const SecurityConfig &getSecurityConfig() const { return config_.security; }
+    const char *getFirmwareVersion() const { return config_.firmware_version; }
 
     // Setters
     void setWiFiConfig(const char *ssid, const char *password, const char *hostname = "bitbots-ecoWatt");
     void setAPIConfig(const char *api_key, const char *read_url, const char *write_url, const char *upload_url = NULL, const char *config_url = NULL, uint16_t timeout_ms = 5000);
     void setDeviceConfig(uint8_t slave_addr, uint16_t poll_interval, uint16_t upload_interval, uint8_t buffer_size);
+    void setFirmwareVersion(const char *version);
     void updatePollingConfig(uint16_t new_interval, const std::vector<ParameterType> &new_params);
 
     uint32_t getNextNonce(); // Increments the nonce, saves it, and returns the new value
