@@ -140,6 +140,18 @@ void setup()
 
     if (systemInitialized)
     {
+        // Check if we just rebooted from an OTA update
+        if (configManager.getBootStatusConfig().ota_reboot_pending)
+        {
+            Serial.println("[BOOT] Detected successful OTA reboot");
+            configManager.setBootStatus("success", "");
+        }
+        else if (!configManager.getBootStatusConfig().boot_success_reported)
+        {
+            Serial.println("[BOOT] Setting boot status to success");
+            configManager.setBootStatus("success", "");
+        }
+
         fota.begin();
         setupPollingConfig();
 
@@ -158,6 +170,7 @@ void setup()
     else
     {
         Serial.println("[MAIN] System initialization failed!");
+        configManager.setBootStatus("failure", "System initialization failed");
     }
 }
 
@@ -577,6 +590,25 @@ bool sendConfigRequest()
     requestDoc["firmware_version"] = configManager.getFirmwareVersion();
     requestDoc["status"] = "ready";
 
+    // Add boot status if needed
+    if (configManager.needsBootStatusReport())
+    {
+        const BootStatusConfig &bootStatus = configManager.getBootStatusConfig();
+        JsonObject bootData = requestDoc.createNestedObject("boot_data");
+        bootData["status"] = bootStatus.last_boot_status;
+        bootData["firmware_version"] = configManager.getFirmwareVersion();
+        if (strlen(bootStatus.boot_error_message) > 0)
+        {
+            bootData["error_message"] = bootStatus.boot_error_message;
+        }
+        else
+        {
+            bootData["error_message"] = "";
+        }
+        
+        Serial.println("[CONFIG] Adding boot status to config request");
+    }
+
     // Add FOTA status if there's an ongoing update
     JsonObject requestObj = requestDoc.as<JsonObject>();
     fota.addStatusToConfigRequest(requestObj);
@@ -841,6 +873,13 @@ bool sendConfigRequest()
                         Serial.print(", unchanged=");
                         Serial.println(unchangedParams.size());
 
+                        // Mark boot status as reported if we successfully sent it
+                        if (configManager.needsBootStatusReport())
+                        {
+                            configManager.markBootSuccessReported();
+                            Serial.println("[CONFIG] Boot status reported successfully");
+                        }
+
                         httpClient.end();
                         return true;
                     }
@@ -877,6 +916,13 @@ bool sendConfigRequest()
                             Serial.println("[COMMAND] Error: Invalid command format");
                         }
 
+                        // Mark boot status as reported if we successfully sent it
+                        if (configManager.needsBootStatusReport())
+                        {
+                            configManager.markBootSuccessReported();
+                            Serial.println("[CONFIG] Boot status reported successfully");
+                        }
+
                         httpClient.end();
                         return true;
                     }
@@ -887,6 +933,14 @@ bool sendConfigRequest()
                     if (fota.processSecureFOTAResponse(responseStr))
                     {
                         Serial.println("[CONFIG] FOTA processing completed successfully");
+                        
+                        // Mark boot status as reported if we successfully sent it
+                        if (configManager.needsBootStatusReport())
+                        {
+                            configManager.markBootSuccessReported();
+                            Serial.println("[CONFIG] Boot status reported successfully");
+                        }
+                        
                         httpClient.end();
                         return true;
                     }
@@ -894,6 +948,14 @@ bool sendConfigRequest()
                     {
                         // No configuration update, command, or FOTA available
                         Serial.println("[CONFIG] No configuration update, command, or FOTA available");
+                        
+                        // Mark boot status as reported if we successfully sent it
+                        if (configManager.needsBootStatusReport())
+                        {
+                            configManager.markBootSuccessReported();
+                            Serial.println("[CONFIG] Boot status reported successfully");
+                        }
+                        
                         httpClient.end();
                         return true;
                     }

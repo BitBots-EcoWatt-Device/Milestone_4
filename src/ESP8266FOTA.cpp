@@ -1,7 +1,6 @@
 #include "ESP8266FOTA.h"
 #include "ESP8266Config.h"
 #include "ESP8266Security.h"
-#include <LittleFS.h>
 #include <SHA256.h>
 
 ESP8266FOTA::ESP8266FOTA()
@@ -12,37 +11,7 @@ ESP8266FOTA::ESP8266FOTA()
 void ESP8266FOTA::begin()
 {
     Serial.println("[FOTA] Initializing FOTA system...");
-    
-    // Initialize LittleFS for chunk storage
-    if (!LittleFS.begin())
-    {
-        Serial.println("[FOTA] Warning: Failed to initialize LittleFS");
-        Serial.println("[FOTA] Attempting to format LittleFS...");
-        if (LittleFS.format())
-        {
-            Serial.println("[FOTA] LittleFS formatted successfully");
-            if (!LittleFS.begin())
-            {
-                Serial.println("[FOTA] Error: Still cannot initialize LittleFS");
-            }
-            else
-            {
-                Serial.println("[FOTA] LittleFS initialized after format");
-            }
-        }
-        else
-        {
-            Serial.println("[FOTA] Error: Failed to format LittleFS");
-        }
-    }
-    else
-    {
-        Serial.println("[FOTA] LittleFS initialized successfully");
-    }
-    
-    // Clean up any existing FOTA files from previous incomplete updates
     cleanupPreviousFOTA();
-    
     reset();
     Serial.println("[FOTA] FOTA system initialized");
 }
@@ -58,6 +27,10 @@ void ESP8266FOTA::reset()
     manifest_received_ = false;
     total_chunks_received_ = 0;
     memset(chunks_received_bitmap_, 0, sizeof(chunks_received_bitmap_));
+    update_session_initialized_ = false;
+    bytes_written_ = 0;
+    hash_initialized_ = false;
+    streaming_hash_.reset();
 }
 
 float ESP8266FOTA::getProgress() const
@@ -257,6 +230,7 @@ bool ESP8266FOTA::processManifest(const JsonObject &fota)
     }
 
     // Store manifest
+    abortStreamingUpdate();
     manifest_ = tempManifest;
     manifest_received_ = true;
     update_in_progress_ = true;
@@ -265,6 +239,10 @@ bool ESP8266FOTA::processManifest(const JsonObject &fota)
     chunk_verified_ = true;
     total_chunks_received_ = 0;
     memset(chunks_received_bitmap_, 0, sizeof(chunks_received_bitmap_));
+    bytes_written_ = 0;
+    hash_initialized_ = true;
+    streaming_hash_.reset();
+    update_session_initialized_ = false;
 
     Serial.println("[FOTA] Manifest processed successfully:");
     Serial.print("  Version: ");
@@ -331,11 +309,60 @@ bool ESP8266FOTA::processChunk(const JsonObject &fota)
         return false;
     }
 
-    // Store the chunk
-    if (!storeFirmwareChunk(chunk_number, data, mac))
+    // Ensure streaming update session is ready
+    if (!beginStreamingUpdate())
     {
-        Serial.print("[FOTA] Error: Failed to store chunk ");
-        Serial.println(chunk_number);
+        Serial.println("[FOTA] Error: Failed to initialize OTA streaming session");
+        chunk_verified_ = false;
+        return false;
+    }
+
+    // Decode base64 data
+    unsigned int decodedLength = ESP8266Security::getBase64DecodedLength(data);
+    if (decodedLength == 0)
+    {
+        Serial.println("[FOTA] Error: Invalid base64 data length");
+        abortStreamingUpdate();
+        chunk_verified_ = false;
+        return false;
+    }
+
+    unsigned char *decodedBuffer = new unsigned char[decodedLength];
+    if (!decodedBuffer)
+    {
+        Serial.println("[FOTA] Error: Failed to allocate memory for decoded chunk");
+        abortStreamingUpdate();
+        chunk_verified_ = false;
+        return false;
+    }
+
+    ESP8266Security::decodeBase64(data, decodedBuffer);
+
+    if (hash_initialized_)
+    {
+        streaming_hash_.update(decodedBuffer, decodedLength);
+    }
+
+    size_t written = Update.write(decodedBuffer, decodedLength);
+    delete[] decodedBuffer;
+
+    if (written != decodedLength)
+    {
+        Serial.print("[FOTA] Error: Failed to write chunk to flash. Expected ");
+        Serial.print(decodedLength);
+        Serial.print(" bytes, wrote ");
+        Serial.println(written);
+        Update.printError(Serial);
+        abortStreamingUpdate();
+        chunk_verified_ = false;
+        return false;
+    }
+
+    bytes_written_ += written;
+    if (bytes_written_ > manifest_.size)
+    {
+        Serial.println("[FOTA] Error: Received more data than manifest size allows");
+        abortStreamingUpdate();
         chunk_verified_ = false;
         return false;
     }
@@ -356,28 +383,22 @@ bool ESP8266FOTA::processChunk(const JsonObject &fota)
     // Check if all chunks received
     if (isComplete())
     {
-        Serial.println("[FOTA] All chunks received! Assembling firmware...");
-        
-        if (assembleFirmware())
+        Serial.println("[FOTA] All chunks received! Finalizing firmware...");
+
+        if (finalizeStreamingUpdate())
         {
-            Serial.println("[FOTA] Firmware assembled successfully");
+            Serial.println("[FOTA] Firmware validation successful - Ready for installation!");
+            Serial.println("[FOTA] Rebooting to apply new firmware...");
             
-            if (validateAssembledFirmware())
-            {
-                Serial.println("[FOTA] Firmware validation successful - Ready for installation!");
-                // TODO: Trigger firmware installation/reboot
-                // ESP.restart(); // Uncomment when ready to flash new firmware
-            }
-            else
-            {
-                Serial.println("[FOTA] Error: Firmware validation failed");
-                // Clean up invalid firmware
-                LittleFS.remove("/fota_firmware.bin");
-            }
+            // Mark that we're about to reboot for OTA update
+            configManager.setOTARebootFlag(true);
+            
+            delay(1000); // Give time for serial output
+            ESP.restart(); // Apply new firmware
         }
         else
         {
-            Serial.println("[FOTA] Error: Failed to assemble firmware");
+            Serial.println("[FOTA] Error: Firmware finalization failed");
         }
     }
 
@@ -536,88 +557,6 @@ bool ESP8266FOTA::validateChunk(uint16_t chunk_number, const String &data, const
     return true;
 }
 
-bool ESP8266FOTA::storeFirmwareChunk(uint16_t chunk_number, const String &data, const String &mac)
-{
-    String filename = getChunkFilename(chunk_number);
-    
-    Serial.print("[FOTA] Storing chunk ");
-    Serial.print(chunk_number);
-    Serial.print(" (");
-    Serial.print(data.length());
-    Serial.print(" base64 chars) to ");
-    Serial.println(filename);
-
-    // Decode base64 data
-    unsigned int decodedLength = ESP8266Security::getBase64DecodedLength(data);
-    if (decodedLength == 0)
-    {
-        Serial.println("[FOTA] Error: Invalid base64 data length");
-        return false;
-    }
-    
-    unsigned char *decodedBuffer = new unsigned char[decodedLength];
-    if (!decodedBuffer)
-    {
-        Serial.println("[FOTA] Error: Failed to allocate memory for decoded chunk");
-        return false;
-    }
-    
-    ESP8266Security::decodeBase64(data, decodedBuffer);
-    
-    // Write to LittleFS
-    File chunkFile = LittleFS.open(filename, "w");
-    if (!chunkFile)
-    {
-        Serial.print("[FOTA] Error: Failed to create chunk file ");
-        Serial.println(filename);
-        delete[] decodedBuffer;
-        return false;
-    }
-    
-    size_t bytesWritten = chunkFile.write(decodedBuffer, decodedLength);
-    chunkFile.close();
-    delete[] decodedBuffer;
-    
-    if (bytesWritten != decodedLength)
-    {
-        Serial.print("[FOTA] Error: Failed to write complete chunk. Expected ");
-        Serial.print(decodedLength);
-        Serial.print(" bytes, wrote ");
-        Serial.println(bytesWritten);
-        LittleFS.remove(filename); // Clean up partial file
-        return false;
-    }
-    
-    // Verify the file was written correctly
-    File verifyFile = LittleFS.open(filename, "r");
-    if (!verifyFile)
-    {
-        Serial.println("[FOTA] Error: Failed to verify chunk file");
-        return false;
-    }
-    
-    size_t fileSize = verifyFile.size();
-    verifyFile.close();
-    
-    if (fileSize != decodedLength)
-    {
-        Serial.print("[FOTA] Error: Chunk file size mismatch. Expected ");
-        Serial.print(decodedLength);
-        Serial.print(" bytes, got ");
-        Serial.println(fileSize);
-        LittleFS.remove(filename);
-        return false;
-    }
-    
-    Serial.print("[FOTA] Successfully stored chunk ");
-    Serial.print(chunk_number);
-    Serial.print(" (");
-    Serial.print(decodedLength);
-    Serial.println(" bytes)");
-    
-    return true;
-}
-
 String ESP8266FOTA::calculateChunkHMAC(const char *psk, const String &base64Data)
 {
     // Calculate HMAC exactly like the server:
@@ -751,246 +690,128 @@ void ESP8266FOTA::printDetailedStatus() const
 
 void ESP8266FOTA::cleanupPreviousFOTA()
 {
-    Serial.println("[FOTA] Cleaning up previous FOTA files...");
-    
-    // Remove any existing chunk files
-    Dir dir = LittleFS.openDir("/");
-    while (dir.next())
-    {
-        String fileName = dir.fileName();
-        if (fileName.startsWith("/fota_chunk_") && fileName.endsWith(".bin"))
-        {
-            Serial.print("[FOTA] Removing old chunk file: ");
-            Serial.println(fileName);
-            LittleFS.remove(fileName);
-        }
-    }
-    
-    // Remove assembled firmware file if it exists
-    if (LittleFS.exists("/fota_firmware.bin"))
-    {
-        Serial.println("[FOTA] Removing old firmware file");
-        LittleFS.remove("/fota_firmware.bin");
-    }
-    
-    Serial.println("[FOTA] Cleanup complete");
+    Serial.println("[FOTA] Resetting previous FOTA state...");
+
+    // ESP8266 Update class doesn't have abort() method
+    // Just reset our tracking state
+    update_session_initialized_ = false;
+    bytes_written_ = 0;
+    hash_initialized_ = false;
+    streaming_hash_.reset();
 }
 
-String ESP8266FOTA::getChunkFilename(uint16_t chunk_number) const
+bool ESP8266FOTA::beginStreamingUpdate()
 {
-    return "/fota_chunk_" + String(chunk_number) + ".bin";
-}
+    if (update_session_initialized_)
+    {
+        return true;
+    }
 
-bool ESP8266FOTA::assembleFirmware()
-{
-    if (!isComplete())
+    if (!manifest_.valid || manifest_.size == 0)
     {
-        Serial.println("[FOTA] Error: Cannot assemble firmware - not all chunks received");
+        Serial.println("[FOTA] Error: Cannot start OTA - invalid manifest");
         return false;
     }
-    
-    Serial.println("[FOTA] Assembling firmware from chunks...");
-    
-    // Create the assembled firmware file
-    File firmwareFile = LittleFS.open("/fota_firmware.bin", "w");
-    if (!firmwareFile)
+
+    if (!Update.begin(manifest_.size))
     {
-        Serial.println("[FOTA] Error: Failed to create firmware file");
+        Serial.println("[FOTA] Error: Update.begin failed");
+        Update.printError(Serial);
         return false;
     }
-    
-    // Buffer for reading chunks
-    const size_t bufferSize = 1024;
-    uint8_t *buffer = new uint8_t[bufferSize];
-    if (!buffer)
+
+    update_session_initialized_ = true;
+    bytes_written_ = 0;
+
+    if (!hash_initialized_)
     {
-        Serial.println("[FOTA] Error: Failed to allocate assembly buffer");
-        firmwareFile.close();
-        return false;
+        streaming_hash_.reset();
+        hash_initialized_ = true;
     }
-    
-    uint32_t totalBytesWritten = 0;
-    bool assemblySuccess = true;
-    
-    // Assemble chunks in order
-    for (uint16_t chunkNum = 0; chunkNum < manifest_.total_chunks; chunkNum++)
-    {
-        String chunkFilename = getChunkFilename(chunkNum);
-        
-        if (!LittleFS.exists(chunkFilename))
-        {
-            Serial.print("[FOTA] Error: Missing chunk file ");
-            Serial.println(chunkFilename);
-            assemblySuccess = false;
-            break;
-        }
-        
-        File chunkFile = LittleFS.open(chunkFilename, "r");
-        if (!chunkFile)
-        {
-            Serial.print("[FOTA] Error: Failed to open chunk file ");
-            Serial.println(chunkFilename);
-            assemblySuccess = false;
-            break;
-        }
-        
-        // Copy chunk data to firmware file
-        size_t chunkSize = chunkFile.size();
-        size_t bytesRead = 0;
-        
-        while (bytesRead < chunkSize)
-        {
-            size_t toRead = min(bufferSize, chunkSize - bytesRead);
-            size_t actualRead = chunkFile.read(buffer, toRead);
-            
-            if (actualRead != toRead)
-            {
-                Serial.print("[FOTA] Error: Failed to read from chunk ");
-                Serial.println(chunkNum);
-                assemblySuccess = false;
-                break;
-            }
-            
-            size_t written = firmwareFile.write(buffer, actualRead);
-            if (written != actualRead)
-            {
-                Serial.print("[FOTA] Error: Failed to write to firmware file at chunk ");
-                Serial.println(chunkNum);
-                assemblySuccess = false;
-                break;
-            }
-            
-            bytesRead += actualRead;
-            totalBytesWritten += written;
-        }
-        
-        chunkFile.close();
-        
-        if (!assemblySuccess)
-            break;
-            
-        Serial.print("[FOTA] Assembled chunk ");
-        Serial.print(chunkNum);
-        Serial.print(" (");
-        Serial.print(chunkSize);
-        Serial.println(" bytes)");
-    }
-    
-    delete[] buffer;
-    firmwareFile.close();
-    
-    if (!assemblySuccess)
-    {
-        Serial.println("[FOTA] Firmware assembly failed");
-        LittleFS.remove("/fota_firmware.bin");
-        return false;
-    }
-    
-    // Verify assembled size matches manifest
-    if (totalBytesWritten != manifest_.size)
-    {
-        Serial.print("[FOTA] Error: Assembled firmware size mismatch. Expected ");
-        Serial.print(manifest_.size);
-        Serial.print(" bytes, got ");
-        Serial.println(totalBytesWritten);
-        LittleFS.remove("/fota_firmware.bin");
-        return false;
-    }
-    
-    Serial.print("[FOTA] Firmware assembly complete (");
-    Serial.print(totalBytesWritten);
-    Serial.println(" bytes)");
-    
+
+    Serial.println("[FOTA] OTA streaming session started");
     return true;
 }
 
-bool ESP8266FOTA::validateAssembledFirmware() const
+bool ESP8266FOTA::finalizeStreamingUpdate()
 {
-    if (!LittleFS.exists("/fota_firmware.bin"))
+    if (!update_session_initialized_)
     {
-        Serial.println("[FOTA] Error: No assembled firmware file found");
+        Serial.println("[FOTA] Error: No OTA session to finalize");
         return false;
     }
-    
-    File firmwareFile = LittleFS.open("/fota_firmware.bin", "r");
-    if (!firmwareFile)
+
+    if (bytes_written_ != manifest_.size)
     {
-        Serial.println("[FOTA] Error: Cannot open assembled firmware file");
-        return false;
-    }
-    
-    // Verify file size
-    size_t fileSize = firmwareFile.size();
-    if (fileSize != manifest_.size)
-    {
-        Serial.print("[FOTA] Error: Firmware file size mismatch. Expected ");
+        Serial.print("[FOTA] Error: Written bytes (");
+        Serial.print(bytes_written_);
+        Serial.print(") do not match manifest size (");
         Serial.print(manifest_.size);
-        Serial.print(" bytes, got ");
-        Serial.println(fileSize);
-        firmwareFile.close();
+        Serial.println(")");
+        // Cannot abort on ESP8266, just reset state
+        update_session_initialized_ = false;
+        hash_initialized_ = false;
+        streaming_hash_.reset();
         return false;
     }
-    
-    // Calculate SHA256 hash of assembled firmware
-    Serial.println("[FOTA] Calculating firmware hash...");
-    SHA256 sha256;
-    sha256.reset();
-    
-    const size_t bufferSize = 1024;
-    uint8_t *buffer = new uint8_t[bufferSize];
-    if (!buffer)
-    {
-        Serial.println("[FOTA] Error: Failed to allocate hash buffer");
-        firmwareFile.close();
-        return false;
-    }
-    
-    size_t bytesRead = 0;
-    while (bytesRead < fileSize)
-    {
-        size_t toRead = min(bufferSize, fileSize - bytesRead);
-        size_t actualRead = firmwareFile.read(buffer, toRead);
-        
-        if (actualRead != toRead)
-        {
-            Serial.println("[FOTA] Error: Failed to read firmware for hashing");
-            delete[] buffer;
-            firmwareFile.close();
-            return false;
-        }
-        
-        sha256.update(buffer, actualRead);
-        bytesRead += actualRead;
-    }
-    
-    delete[] buffer;
-    firmwareFile.close();
-    
-    // Finalize hash
+
     uint8_t hash[SHA256::HASH_SIZE];
-    sha256.finalize(hash, sizeof(hash));
-    
-    // Convert hash to hex string
+    streaming_hash_.finalize(hash, sizeof(hash));
+    hash_initialized_ = false;
+
     String calculatedHash = "";
+    calculatedHash.reserve(SHA256::HASH_SIZE * 2);
     for (int i = 0; i < SHA256::HASH_SIZE; i++)
     {
         char hex[3];
         sprintf(hex, "%02x", hash[i]);
         calculatedHash += hex;
     }
-    
+
     Serial.print("[FOTA] Expected hash: ");
     Serial.println(manifest_.hash);
     Serial.print("[FOTA] Calculated hash: ");
     Serial.println(calculatedHash);
-    
-    // Compare with manifest hash
+
     if (!calculatedHash.equalsIgnoreCase(manifest_.hash))
     {
         Serial.println("[FOTA] Error: Firmware hash validation failed");
+        // Cannot abort on ESP8266, just reset state
+        update_session_initialized_ = false;
+        streaming_hash_.reset();
         return false;
     }
-    
-    Serial.println("[FOTA] Firmware hash validation successful");
+
+    if (!Update.end())
+    {
+        Serial.println("[FOTA] Error: Update.end failed");
+        Update.printError(Serial);
+        // Cannot abort on ESP8266, just reset state
+        update_session_initialized_ = false;
+        streaming_hash_.reset();
+        return false;
+    }
+
+    if (!Update.isFinished())
+    {
+        Serial.println("[FOTA] Error: Update not finished after end");
+        // Cannot abort on ESP8266, just reset state
+        update_session_initialized_ = false;
+        streaming_hash_.reset();
+        return false;
+    }
+
+    Serial.println("[FOTA] OTA streaming session finalized successfully");
+    update_session_initialized_ = false;
     return true;
+}
+
+void ESP8266FOTA::abortStreamingUpdate()
+{
+    // ESP8266 Update class doesn't have abort() method
+    // Just reset our tracking state
+    update_session_initialized_ = false;
+    bytes_written_ = 0;
+    hash_initialized_ = false;
+    streaming_hash_.reset();
 }

@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <SHA256.h>
+#include <Updater.h>
 #include <vector>
 
 // FOTA (Firmware Over The Air) structures
@@ -95,6 +97,10 @@ private:
     bool manifest_ack_sent_;
     uint32_t chunks_received_bitmap_[16]; // Bitmap to track received chunks (supports up to 512 chunks)
     uint16_t total_chunks_received_;
+    bool update_session_initialized_;
+    uint32_t bytes_written_;
+    SHA256 streaming_hash_;
+    bool hash_initialized_;
     
     // Internal processing
     bool processManifest(const JsonObject &fota);
@@ -106,9 +112,11 @@ private:
     uint16_t getNextMissingChunk() const;
     
     // Storage and verification
-    bool storeFirmwareChunk(uint16_t chunk_number, const String &data, const String &mac);
     bool verifyChunkMAC(const String &data, const String &mac);
     String calculateChunkHMAC(const char *psk, const String &base64Data);
+    bool beginStreamingUpdate();
+    bool finalizeStreamingUpdate();
+    void abortStreamingUpdate();
     
     // Validation
     bool validateManifest(const FOTAManifest &manifest) const;
@@ -116,9 +124,6 @@ private:
     
     // File system management
     void cleanupPreviousFOTA();
-    String getChunkFilename(uint16_t chunk_number) const;
-    bool assembleFirmware();
-    bool validateAssembledFirmware() const;
 };
 
 #endif // ESP8266_FOTA_H

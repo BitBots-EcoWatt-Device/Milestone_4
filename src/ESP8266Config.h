@@ -41,12 +41,21 @@ struct SecurityConfig
     uint32_t nonce; // Anti-replay counter
 };
 
+struct BootStatusConfig
+{
+    bool ota_reboot_pending;     // Flag set before OTA reboot
+    bool boot_success_reported;  // Flag to track if boot success was reported
+    char last_boot_status[16];   // "success", "failure", "rebooting"
+    char boot_error_message[64]; // Error details if any
+};
+
 struct ESP8266Config
 {
     WiFiConfig wifi;
     APIConfig api;
     DeviceConfig device;
     SecurityConfig security;
+    BootStatusConfig boot_status;
     char firmware_version[16]; // Firmware version string (e.g., "1.0.0")
     uint32_t magic; // For EEPROM validation
 };
@@ -66,6 +75,7 @@ public:
     const APIConfig &getAPIConfig() const { return config_.api; }
     const DeviceConfig &getDeviceConfig() const { return config_.device; }
     const SecurityConfig &getSecurityConfig() const { return config_.security; }
+    const BootStatusConfig &getBootStatusConfig() const { return config_.boot_status; }
     const char *getFirmwareVersion() const { return config_.firmware_version; }
 
     // Setters
@@ -74,6 +84,12 @@ public:
     void setDeviceConfig(uint8_t slave_addr, uint16_t poll_interval, uint16_t upload_interval, uint8_t buffer_size);
     void setFirmwareVersion(const char *version);
     void updatePollingConfig(uint16_t new_interval, const std::vector<ParameterType> &new_params);
+
+    // Boot status management
+    void setOTARebootFlag(bool pending);
+    void setBootStatus(const char *status, const char *error_message = "");
+    void markBootSuccessReported();
+    bool needsBootStatusReport() const;
 
     uint32_t getNextNonce(); // Increments the nonce, saves it, and returns the new value
 
