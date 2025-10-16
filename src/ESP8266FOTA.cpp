@@ -444,17 +444,17 @@ void ESP8266FOTA::addStatusToConfigRequest(JsonObject &requestObj)
             manifest_ack_sent_ = true;  // Mark that we've sent the ACK
             Serial.println("[FOTA] Sending manifest acknowledgment (server will change status to 'active')");
         }
-        else if (last_chunk_received_ > 0)
+        else if (total_chunks_received_ > 0)
         {
             // Step 2+: Normal chunk acknowledgment after server status is "active"
             JsonObject fotaStatusObj = requestObj.createNestedObject("fota_status");
             
             // Correct format: chunk_received (0-indexed) and verified
-            fotaStatusObj["chunk_received"] = last_chunk_received_ - 1;  // Convert to 0-indexed
+            fotaStatusObj["chunk_received"] = last_chunk_received_;
             fotaStatusObj["verified"] = chunk_verified_;
             
             Serial.print("[FOTA] Sending chunk_received: ");
-            Serial.print(last_chunk_received_ - 1);
+            Serial.print(last_chunk_received_);
             Serial.print(", verified: ");
             Serial.println(chunk_verified_ ? "true" : "false");
         }

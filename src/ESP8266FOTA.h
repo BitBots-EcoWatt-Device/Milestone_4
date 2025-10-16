@@ -56,7 +56,7 @@ public:
     // Status queries
     bool isUpdateInProgress() const { return update_in_progress_; }
     bool isManifestReceived() const { return manifest_received_; }
-    bool hasLastChunkInfo() const { return last_chunk_received_ > 0; }
+    bool hasLastChunkInfo() const { return total_chunks_received_ > 0; }
     uint16_t getLastChunkReceived() const { return last_chunk_received_; }
     bool isLastChunkVerified() const { return chunk_verified_; }
     uint16_t getTotalChunksReceived() const { return total_chunks_received_; }
