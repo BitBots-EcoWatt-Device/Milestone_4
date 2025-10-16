@@ -3,11 +3,9 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <Hash.h>
 #include <SHA256.h>
 #include <Updater.h>
-#include <vector>
-
-// FOTA (Firmware Over The Air) structures
 struct FOTAManifest
 {
     String version;
@@ -87,6 +85,13 @@ public:
     void printDetailedStatus() const;
 
 private:
+    enum class HashType
+    {
+        NONE,
+        MD5,
+        SHA256
+    };
+
     // State variables
     FOTAManifest manifest_;
     uint16_t last_chunk_received_;
@@ -99,7 +104,9 @@ private:
     uint16_t total_chunks_received_;
     bool update_session_initialized_;
     uint32_t bytes_written_;
-    SHA256 streaming_hash_;
+    HashType hash_type_;
+    SHA256 streaming_sha256_;
+    MD5Builder streaming_md5_;
     bool hash_initialized_;
     
     // Internal processing

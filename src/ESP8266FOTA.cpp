@@ -29,8 +29,9 @@ void ESP8266FOTA::reset()
     memset(chunks_received_bitmap_, 0, sizeof(chunks_received_bitmap_));
     update_session_initialized_ = false;
     bytes_written_ = 0;
+    hash_type_ = HashType::NONE;
     hash_initialized_ = false;
-    streaming_hash_.reset();
+    streaming_sha256_.reset();
 }
 
 float ESP8266FOTA::getProgress() const
@@ -229,6 +230,25 @@ bool ESP8266FOTA::processManifest(const JsonObject &fota)
         return false;
     }
 
+    // Determine hash type based on manifest hash length
+    size_t hashLength = hash.length();
+    if (hashLength == 32)
+    {
+        hash_type_ = HashType::MD5;
+        Serial.println("[FOTA] Manifest hash algorithm: MD5");
+    }
+    else if (hashLength == 64)
+    {
+        hash_type_ = HashType::SHA256;
+        Serial.println("[FOTA] Manifest hash algorithm: SHA256");
+    }
+    else
+    {
+        Serial.print("[FOTA] Error: Unsupported manifest hash length: ");
+        Serial.println(hashLength);
+        return false;
+    }
+
     // Store manifest
     abortStreamingUpdate();
     manifest_ = tempManifest;
@@ -240,8 +260,7 @@ bool ESP8266FOTA::processManifest(const JsonObject &fota)
     total_chunks_received_ = 0;
     memset(chunks_received_bitmap_, 0, sizeof(chunks_received_bitmap_));
     bytes_written_ = 0;
-    hash_initialized_ = true;
-    streaming_hash_.reset();
+    hash_initialized_ = false;
     update_session_initialized_ = false;
 
     Serial.println("[FOTA] Manifest processed successfully:");
@@ -340,7 +359,14 @@ bool ESP8266FOTA::processChunk(const JsonObject &fota)
 
     if (hash_initialized_)
     {
-        streaming_hash_.update(decodedBuffer, decodedLength);
+        if (hash_type_ == HashType::SHA256)
+        {
+            streaming_sha256_.update(decodedBuffer, decodedLength);
+        }
+        else if (hash_type_ == HashType::MD5)
+        {
+            streaming_md5_.add(decodedBuffer, decodedLength);
+        }
     }
 
     size_t written = Update.write(decodedBuffer, decodedLength);
@@ -697,7 +723,8 @@ void ESP8266FOTA::cleanupPreviousFOTA()
     update_session_initialized_ = false;
     bytes_written_ = 0;
     hash_initialized_ = false;
-    streaming_hash_.reset();
+    streaming_sha256_.reset();
+    streaming_md5_.begin();
 }
 
 bool ESP8266FOTA::beginStreamingUpdate()
@@ -725,8 +752,20 @@ bool ESP8266FOTA::beginStreamingUpdate()
 
     if (!hash_initialized_)
     {
-        streaming_hash_.reset();
-        hash_initialized_ = true;
+        if (hash_type_ == HashType::SHA256)
+        {
+            streaming_sha256_.reset();
+            hash_initialized_ = true;
+        }
+        else if (hash_type_ == HashType::MD5)
+        {
+            streaming_md5_.begin();
+            hash_initialized_ = true;
+        }
+        else
+        {
+            hash_initialized_ = false;
+        }
     }
 
     Serial.println("[FOTA] OTA streaming session started");
@@ -735,11 +774,18 @@ bool ESP8266FOTA::beginStreamingUpdate()
 
 bool ESP8266FOTA::finalizeStreamingUpdate()
 {
+    Serial.println("[FOTA] DEBUG: Entering finalizeStreamingUpdate()");
+
     if (!update_session_initialized_)
     {
         Serial.println("[FOTA] Error: No OTA session to finalize");
         return false;
     }
+
+    Serial.print("[FOTA] DEBUG: Checking bytes - written: ");
+    Serial.print(bytes_written_);
+    Serial.print(", expected: ");
+    Serial.println(manifest_.size);
 
     if (bytes_written_ != manifest_.size)
     {
@@ -751,21 +797,37 @@ bool ESP8266FOTA::finalizeStreamingUpdate()
         // Cannot abort on ESP8266, just reset state
         update_session_initialized_ = false;
         hash_initialized_ = false;
-        streaming_hash_.reset();
+        streaming_sha256_.reset();
+        streaming_md5_.begin();
         return false;
     }
 
-    uint8_t hash[SHA256::HASH_SIZE];
-    streaming_hash_.finalize(hash, sizeof(hash));
-    hash_initialized_ = false;
-
     String calculatedHash = "";
-    calculatedHash.reserve(SHA256::HASH_SIZE * 2);
-    for (int i = 0; i < SHA256::HASH_SIZE; i++)
+
+    if (hash_type_ == HashType::SHA256)
     {
-        char hex[3];
-        sprintf(hex, "%02x", hash[i]);
-        calculatedHash += hex;
+        uint8_t hash[SHA256::HASH_SIZE];
+        streaming_sha256_.finalize(hash, sizeof(hash));
+        hash_initialized_ = false;
+
+        calculatedHash.reserve(SHA256::HASH_SIZE * 2);
+        for (int i = 0; i < SHA256::HASH_SIZE; i++)
+        {
+            char hex[3];
+            sprintf(hex, "%02x", hash[i]);
+            calculatedHash += hex;
+        }
+    }
+    else if (hash_type_ == HashType::MD5)
+    {
+        streaming_md5_.calculate();
+        hash_initialized_ = false;
+        calculatedHash = streaming_md5_.toString();
+    }
+    else
+    {
+        Serial.println("[FOTA] Warning: No hash algorithm selected; skipping validation");
+        hash_initialized_ = false;
     }
 
     Serial.print("[FOTA] Expected hash: ");
@@ -773,12 +835,13 @@ bool ESP8266FOTA::finalizeStreamingUpdate()
     Serial.print("[FOTA] Calculated hash: ");
     Serial.println(calculatedHash);
 
-    if (!calculatedHash.equalsIgnoreCase(manifest_.hash))
+    if (calculatedHash.length() > 0 && !calculatedHash.equalsIgnoreCase(manifest_.hash))
     {
         Serial.println("[FOTA] Error: Firmware hash validation failed");
         // Cannot abort on ESP8266, just reset state
         update_session_initialized_ = false;
-        streaming_hash_.reset();
+        streaming_sha256_.reset();
+        streaming_md5_.begin();
         return false;
     }
 
@@ -788,7 +851,8 @@ bool ESP8266FOTA::finalizeStreamingUpdate()
         Update.printError(Serial);
         // Cannot abort on ESP8266, just reset state
         update_session_initialized_ = false;
-        streaming_hash_.reset();
+        streaming_sha256_.reset();
+        streaming_md5_.begin();
         return false;
     }
 
@@ -797,7 +861,8 @@ bool ESP8266FOTA::finalizeStreamingUpdate()
         Serial.println("[FOTA] Error: Update not finished after end");
         // Cannot abort on ESP8266, just reset state
         update_session_initialized_ = false;
-        streaming_hash_.reset();
+        streaming_sha256_.reset();
+        streaming_md5_.begin();
         return false;
     }
 
@@ -813,5 +878,6 @@ void ESP8266FOTA::abortStreamingUpdate()
     update_session_initialized_ = false;
     bytes_written_ = 0;
     hash_initialized_ = false;
-    streaming_hash_.reset();
+    streaming_sha256_.reset();
+    streaming_md5_.begin();
 }
