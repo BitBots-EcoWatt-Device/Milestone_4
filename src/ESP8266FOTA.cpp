@@ -425,6 +425,13 @@ uint16_t ESP8266FOTA::getNextMissingChunk() const
 
 void ESP8266FOTA::addStatusToConfigRequest(JsonObject &requestObj)
 {
+    Serial.print("[DEBUG] addStatusToConfigRequest called - update_in_progress_: ");
+    Serial.print(update_in_progress_ ? "true" : "false");
+    Serial.print(", manifest_ack_sent_: ");
+    Serial.print(manifest_ack_sent_ ? "true" : "false");
+    Serial.print(", last_chunk_received_: ");
+    Serial.println(last_chunk_received_);
+    
     // Add FOTA status if there's an ongoing update
     if (update_in_progress_)
     {
@@ -442,17 +449,25 @@ void ESP8266FOTA::addStatusToConfigRequest(JsonObject &requestObj)
             // Step 2+: Normal chunk acknowledgment after server status is "active"
             JsonObject fotaStatusObj = requestObj.createNestedObject("fota_status");
             
-            // Format: chunk_0_ack, chunk_1_ack, etc. (0-indexed for server)
-            String chunkAckKey = "chunk_" + String(last_chunk_received_ - 1) + "_ack";
-            fotaStatusObj[chunkAckKey] = chunk_verified_;
+            // Correct format: chunk_received (0-indexed) and verified
+            fotaStatusObj["chunk_received"] = last_chunk_received_ - 1;  // Convert to 0-indexed
+            fotaStatusObj["verified"] = chunk_verified_;
             
-            Serial.print("[FOTA] Sending ");
-            Serial.print(chunkAckKey);
-            Serial.print(": ");
+            Serial.print("[FOTA] Sending chunk_received: ");
+            Serial.print(last_chunk_received_ - 1);
+            Serial.print(", verified: ");
             Serial.println(chunk_verified_ ? "true" : "false");
+        }
+        else
+        {
+            Serial.println("[DEBUG] FOTA in progress but no manifest ACK or chunk to send");
         }
         // Note: Server automatically sends next chunk after receiving acknowledgment
         // No explicit chunk requests needed - server manages the flow
+    }
+    else
+    {
+        Serial.println("[DEBUG] No FOTA in progress - no FOTA status added to request");
     }
 }
 
