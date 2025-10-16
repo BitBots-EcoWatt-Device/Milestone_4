@@ -102,6 +102,12 @@ private:
     // Validation
     bool validateManifest(const FOTAManifest &manifest) const;
     bool validateChunk(uint16_t chunk_number, const String &data, const String &mac) const;
+    
+    // File system management
+    void cleanupPreviousFOTA();
+    String getChunkFilename(uint16_t chunk_number) const;
+    bool assembleFirmware();
+    bool validateAssembledFirmware() const;
 };
 
 #endif // ESP8266_FOTA_H

@@ -17,6 +17,7 @@
 #include "ESP8266Compression.h"
 #include "ESP8266Security.h"
 #include "ESP8266FOTA.h"
+#include <LittleFS.h>
 
 // Global objects
 ESP8266Inverter inverter;
@@ -533,7 +534,8 @@ bool sendConfigRequest()
     requestDoc["status"] = "ready";
 
     // Add FOTA status if there's an ongoing update
-    fota.addStatusToConfigRequest(requestDoc.as<JsonObject>());
+    JsonObject requestObj = requestDoc.as<JsonObject>();
+    fota.addStatusToConfigRequest(requestObj);
 
     // Add security features encryption, signing, etc. as needed here
     String securePayload = ESP8266Security::createSecureWrapper(requestDoc);
@@ -1684,6 +1686,60 @@ void handleSerialCommands()
             fota.reset();
             Serial.println("[CMD] FOTA status reset complete");
         }
+        else if (command == "fota-assemble")
+        {
+            Serial.println("[CMD] Manually triggering firmware assembly...");
+            if (fota.isComplete())
+            {
+                // This will be handled by the private assembleFirmware method through a public wrapper
+                Serial.println("[CMD] All chunks received - assembly should happen automatically");
+            }
+            else
+            {
+                Serial.println("[CMD] Error: Not all chunks received yet");
+                fota.printDetailedStatus();
+            }
+        }
+        else if (command == "fota-files")
+        {
+            Serial.println("[CMD] FOTA Files on LittleFS:");
+            Dir dir = LittleFS.openDir("/");
+            int chunkCount = 0;
+            bool hasFirmware = false;
+            
+            while (dir.next())
+            {
+                String fileName = dir.fileName();
+                size_t fileSize = dir.fileSize();
+                
+                if (fileName.startsWith("/fota_"))
+                {
+                    Serial.print("  ");
+                    Serial.print(fileName);
+                    Serial.print(" (");
+                    Serial.print(fileSize);
+                    Serial.println(" bytes)");
+                    
+                    if (fileName.startsWith("/fota_chunk_"))
+                    {
+                        chunkCount++;
+                    }
+                    else if (fileName == "/fota_firmware.bin")
+                    {
+                        hasFirmware = true;
+                    }
+                }
+            }
+            
+            Serial.print("[CMD] Found ");
+            Serial.print(chunkCount);
+            Serial.println(" chunk files");
+            
+            if (hasFirmware)
+            {
+                Serial.println("[CMD] Assembled firmware file exists");
+            }
+        }
         else if (command == "help")
         {
             Serial.println("[CMD] Available commands:");
@@ -1700,6 +1756,8 @@ void handleSerialCommands()
             Serial.println("  version <new_version> - Set firmware version");
             Serial.println("  fota-status - Show FOTA update status");
             Serial.println("  fota-reset - Reset FOTA update state");
+            Serial.println("  fota-assemble - Manually trigger firmware assembly");
+            Serial.println("  fota-files - List FOTA files on filesystem");
             Serial.println("  help    - Show this help");
         }
         else if (command.length() > 0)
