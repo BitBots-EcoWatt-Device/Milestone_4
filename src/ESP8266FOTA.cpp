@@ -603,6 +603,39 @@ bool ESP8266FOTA::storeFirmwareChunk(uint16_t chunk_number, const String &data, 
     return true;
 }
 
+String ESP8266FOTA::calculateChunkHMAC(const char *psk, const String &base64Data)
+{
+    // Calculate HMAC exactly like the server:
+    // hmac.new(device_psk.encode('utf-8'), chunk_data.encode('utf-8'), hashlib.sha256).hexdigest()
+    // 
+    // This means: HMAC-SHA256(key=psk, message=base64Data) without any nonce prefix
+    
+    SHA256 sha256;
+    
+    // Reset HMAC with the PSK key
+    sha256.resetHMAC(psk, strlen(psk));
+    
+    // Update HMAC with the base64 chunk data directly (as UTF-8 bytes)
+    sha256.update(base64Data.c_str(), base64Data.length());
+    
+    // Finalize HMAC calculation
+    uint8_t mac_result[SHA256::HASH_SIZE];
+    sha256.finalizeHMAC(psk, strlen(psk), mac_result, sizeof(mac_result));
+    
+    // Convert to hex string
+    String mac_hex = "";
+    mac_hex.reserve(sizeof(mac_result) * 2 + 1);
+    
+    for (int i = 0; i < sizeof(mac_result); i++)
+    {
+        char hex_buf[3];
+        sprintf(hex_buf, "%02x", mac_result[i]);
+        mac_hex += hex_buf;
+    }
+    
+    return mac_hex;
+}
+
 bool ESP8266FOTA::verifyChunkMAC(const String &data, const String &mac)
 {
     if (mac.isEmpty())
@@ -619,8 +652,10 @@ bool ESP8266FOTA::verifyChunkMAC(const String &data, const String &mac)
         return false;
     }
     
-    // Use nonce 0 for chunk MAC calculation (chunks don't use nonces)
-    String calculatedMac = ESP8266Security::calculateHMAC(psk, 0, data);
+    // Server calculates HMAC directly on base64 chunk data (as UTF-8 bytes)
+    // Server: hmac.new(device_psk.encode('utf-8'), chunk_data.encode('utf-8'), hashlib.sha256).hexdigest()
+    // We need to calculate HMAC directly on the base64 string without nonce prefix
+    String calculatedMac = calculateChunkHMAC(psk, data);
     
     Serial.print("[FOTA] Expected MAC: ");
     Serial.println(mac);

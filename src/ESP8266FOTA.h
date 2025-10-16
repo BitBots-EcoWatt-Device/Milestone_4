@@ -108,6 +108,7 @@ private:
     // Storage and verification
     bool storeFirmwareChunk(uint16_t chunk_number, const String &data, const String &mac);
     bool verifyChunkMAC(const String &data, const String &mac);
+    String calculateChunkHMAC(const char *psk, const String &base64Data);
     
     // Validation
     bool validateManifest(const FOTAManifest &manifest) const;
