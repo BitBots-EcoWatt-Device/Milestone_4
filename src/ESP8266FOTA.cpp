@@ -53,6 +53,8 @@ void ESP8266FOTA::reset()
     last_chunk_received_ = 0;
     chunk_verified_ = false;
     update_in_progress_ = false;
+    update_just_started_ = false;
+    manifest_ack_sent_ = false;
     manifest_received_ = false;
     total_chunks_received_ = 0;
     memset(chunks_received_bitmap_, 0, sizeof(chunks_received_bitmap_));
@@ -71,6 +73,32 @@ bool ESP8266FOTA::isComplete() const
     return manifest_.valid && 
            total_chunks_received_ == manifest_.total_chunks && 
            manifest_.total_chunks > 0;
+}
+
+unsigned long ESP8266FOTA::getRecommendedPollingInterval() const
+{
+    if (update_in_progress_ && !isComplete())
+    {
+        // Use aggressive polling during FOTA updates
+        // Start with 500ms, increase slightly as we get more chunks to reduce server load
+        float progress = getProgress();
+        if (progress < 25.0f)
+            return 500;   // Very fast polling for initial chunks
+        else if (progress < 75.0f)
+            return 750;   // Moderate fast polling for middle chunks
+        else
+            return 1000;  // Still fast but slightly slower near completion
+    }
+    else
+    {
+        // Normal polling when no FOTA is active
+        return 5000;  // 5 seconds as before
+    }
+}
+
+bool ESP8266FOTA::justStartedUpdate() const
+{
+    return update_just_started_;
 }
 
 bool ESP8266FOTA::processSecureFOTAResponse(const String &secureResponse)
@@ -232,6 +260,7 @@ bool ESP8266FOTA::processManifest(const JsonObject &fota)
     manifest_ = tempManifest;
     manifest_received_ = true;
     update_in_progress_ = true;
+    update_just_started_ = true;  // Flag that update just started for immediate polling
     last_chunk_received_ = 0;
     chunk_verified_ = true;
     total_chunks_received_ = 0;
@@ -377,14 +406,53 @@ bool ESP8266FOTA::isChunkReceived(uint16_t chunk_num) const
     return (chunks_received_bitmap_[byte_index] & (1UL << bit_index)) != 0;
 }
 
-void ESP8266FOTA::addStatusToConfigRequest(JsonObject &requestObj) const
+uint16_t ESP8266FOTA::getNextMissingChunk() const
+{
+    if (!manifest_.valid || manifest_.total_chunks == 0)
+        return 0;
+    
+    // Find the first missing chunk (1-indexed)
+    for (uint16_t chunk = 1; chunk <= manifest_.total_chunks; chunk++)
+    {
+        if (!isChunkReceived(chunk))
+        {
+            return chunk;
+        }
+    }
+    
+    return 0; // All chunks received
+}
+
+void ESP8266FOTA::addStatusToConfigRequest(JsonObject &requestObj)
 {
     // Add FOTA status if there's an ongoing update
-    if (update_in_progress_ && last_chunk_received_ > 0)
+    if (update_in_progress_)
     {
-        JsonObject fotaStatusObj = requestObj.createNestedObject("fota_status");
-        fotaStatusObj["chunk_received"] = last_chunk_received_;
-        fotaStatusObj["verified"] = chunk_verified_;
+        if (manifest_received_ && !manifest_ack_sent_)
+        {
+            // Step 1: Just received manifest, send ONLY acknowledgment 
+            // This tells server to change status from "manifest_sent" to "active"
+            JsonObject fotaStatusObj = requestObj.createNestedObject("fota_status");
+            fotaStatusObj["manifest_ack"] = true;
+            manifest_ack_sent_ = true;  // Mark that we've sent the ACK
+            Serial.println("[FOTA] Sending manifest acknowledgment (server will change status to 'active')");
+        }
+        else if (last_chunk_received_ > 0)
+        {
+            // Step 2+: Normal chunk acknowledgment after server status is "active"
+            JsonObject fotaStatusObj = requestObj.createNestedObject("fota_status");
+            
+            // Format: chunk_0_ack, chunk_1_ack, etc. (0-indexed for server)
+            String chunkAckKey = "chunk_" + String(last_chunk_received_ - 1) + "_ack";
+            fotaStatusObj[chunkAckKey] = chunk_verified_;
+            
+            Serial.print("[FOTA] Sending ");
+            Serial.print(chunkAckKey);
+            Serial.print(": ");
+            Serial.println(chunk_verified_ ? "true" : "false");
+        }
+        // Note: Server automatically sends next chunk after receiving acknowledgment
+        // No explicit chunk requests needed - server manages the flow
     }
 }
 

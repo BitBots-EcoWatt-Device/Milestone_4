@@ -79,6 +79,7 @@ void requestConfigUpdate();
 void executeCommand();
 void setupPollingConfig();
 void applyNewConfiguration();
+void updateConfigPollingRate();
 void printSystemStatus();
 void handleSerialCommands();
 bool uploadToServer(const std::vector<Sample> &samples);
@@ -105,6 +106,9 @@ static uint32_t crc32_calc(const uint8_t *data, size_t len)
 volatile bool pollPending = false;
 volatile bool uploadPending = false;
 volatile bool configRequestPending = false;
+
+// Dynamic config polling interval tracking
+unsigned long currentConfigPollingInterval = 5000;
 
 void IRAM_ATTR onPollTimer()
 {
@@ -192,6 +196,9 @@ void loop()
         configRequestPending = false;
         requestConfigUpdate();
     }
+
+    // Update config polling rate based on FOTA status
+    updateConfigPollingRate();
 
     // Execute pending commands
     if (pendingCommand.valid)
@@ -313,6 +320,43 @@ void applyNewConfiguration()
     Serial.print("[CONFIG] New polling interval: ");
     Serial.print(deviceConfig.poll_interval_ms);
     Serial.println(" ms");
+}
+
+void updateConfigPollingRate()
+{
+    // Check if FOTA just started - if so, immediately request next chunk
+    if (fota.justStartedUpdate())
+    {
+        Serial.println("[FOTA] FOTA update started - triggering immediate config request");
+        configRequestPending = true;
+        fota.clearJustStartedFlag();  // Clear the flag after triggering immediate request
+    }
+    
+    // Get the recommended polling interval from FOTA
+    unsigned long recommendedInterval = fota.getRecommendedPollingInterval();
+    
+    // Only update if the interval has changed to avoid unnecessary timer resets
+    if (recommendedInterval != currentConfigPollingInterval)
+    {
+        currentConfigPollingInterval = recommendedInterval;
+        
+        // Update the configuration request timer
+        configRequestTicker.detach();
+        configRequestTicker.attach_ms(currentConfigPollingInterval, onConfigRequestTimer);
+        
+        if (fota.needsFastPolling())
+        {
+            Serial.print("[FOTA] Switching to fast polling: ");
+            Serial.print(currentConfigPollingInterval);
+            Serial.println(" ms");
+        }
+        else
+        {
+            Serial.print("[CONFIG] Reverting to normal polling: ");
+            Serial.print(currentConfigPollingInterval);
+            Serial.println(" ms");
+        }
+    }
 }
 
 void pollSensors()

@@ -66,12 +66,19 @@ public:
     float getProgress() const;
     bool isComplete() const;
     
+    // Polling optimization
+    unsigned long getRecommendedPollingInterval() const;
+    bool needsFastPolling() const { return update_in_progress_ && !isComplete(); }
+    bool justStartedUpdate() const;
+    void clearJustStartedFlag() { update_just_started_ = false; }
+    void markManifestAckSent() { manifest_ack_sent_ = true; }
+    
     // FOTA processing - works with secure wrapped JSON
     bool processSecureFOTAResponse(const String &secureResponse);
     bool processPlainFOTAResponse(const JsonObject &fotaObj);
     
     // Add FOTA status to config request
-    void addStatusToConfigRequest(JsonObject &requestObj) const;
+    void addStatusToConfigRequest(JsonObject &requestObj);
     
     // Status display
     void printStatus() const;
@@ -84,6 +91,8 @@ private:
     bool chunk_verified_;
     bool update_in_progress_;
     bool manifest_received_;
+    bool update_just_started_;
+    bool manifest_ack_sent_;
     uint32_t chunks_received_bitmap_[16]; // Bitmap to track received chunks (supports up to 512 chunks)
     uint16_t total_chunks_received_;
     
@@ -94,6 +103,7 @@ private:
     // Chunk management
     void markChunkReceived(uint16_t chunk_num);
     bool isChunkReceived(uint16_t chunk_num) const;
+    uint16_t getNextMissingChunk() const;
     
     // Storage and verification
     bool storeFirmwareChunk(uint16_t chunk_number, const String &data, const String &mac);
