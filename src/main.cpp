@@ -16,11 +16,13 @@
 #include "ESP8266PollingConfig.h"
 #include "ESP8266Compression.h"
 #include "ESP8266Security.h"
+#include "ESP8266FOTA.h"
 
 // Global objects
 ESP8266Inverter inverter;
 ESP8266DataBuffer dataBuffer(10); // Smaller buffer for ESP8266
 ESP8266PollingConfig pollingConfig;
+ESP8266FOTA fota;
 
 // Command execution structures
 struct PendingCommand
@@ -133,6 +135,7 @@ void setup()
 
     if (systemInitialized)
     {
+        fota.begin();
         setupPollingConfig();
 
         // Start polling and upload timers
@@ -529,6 +532,9 @@ bool sendConfigRequest()
     requestDoc["firmware_version"] = configManager.getFirmwareVersion();
     requestDoc["status"] = "ready";
 
+    // Add FOTA status if there's an ongoing update
+    fota.addStatusToConfigRequest(requestDoc.as<JsonObject>());
+
     // Add security features encryption, signing, etc. as needed here
     String securePayload = ESP8266Security::createSecureWrapper(requestDoc);
 
@@ -828,10 +834,20 @@ bool sendConfigRequest()
                         httpClient.end();
                         return true;
                     }
+                    
+                    
+                    // Process the entire response through FOTA (handles secure wrapper if needed)
+                    String responseStr = response;
+                    if (fota.processSecureFOTAResponse(responseStr))
+                    {
+                        Serial.println("[CONFIG] FOTA processing completed successfully");
+                        httpClient.end();
+                        return true;
+                    }
                     else
                     {
-                        // No configuration update or command available
-                        Serial.println("[CONFIG] No configuration update or command available");
+                        // No configuration update, command, or FOTA available
+                        Serial.println("[CONFIG] No configuration update, command, or FOTA available");
                         httpClient.end();
                         return true;
                     }
@@ -1516,6 +1532,9 @@ void printSystemStatus()
         Serial.println("Last Command Result: NO");
     }
 
+    // FOTA status
+    fota.printStatus();
+
     Serial.println("========================\n");
 }
 
@@ -1655,6 +1674,16 @@ void handleSerialCommands()
                 Serial.println("[CMD] Example: version 1.1.0");
             }
         }
+        else if (command == "fota-status")
+        {
+            fota.printDetailedStatus();
+        }
+        else if (command == "fota-reset")
+        {
+            Serial.println("[CMD] Resetting FOTA status...");
+            fota.reset();
+            Serial.println("[CMD] FOTA status reset complete");
+        }
         else if (command == "help")
         {
             Serial.println("[CMD] Available commands:");
@@ -1669,6 +1698,8 @@ void handleSerialCommands()
             Serial.println("  wifi    - Show WiFi status");
             Serial.println("  version - Show current firmware version");
             Serial.println("  version <new_version> - Set firmware version");
+            Serial.println("  fota-status - Show FOTA update status");
+            Serial.println("  fota-reset - Reset FOTA update state");
             Serial.println("  help    - Show this help");
         }
         else if (command.length() > 0)

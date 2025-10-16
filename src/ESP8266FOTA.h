@@ -1,0 +1,107 @@
+#ifndef ESP8266_FOTA_H
+#define ESP8266_FOTA_H
+
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#include <vector>
+
+// FOTA (Firmware Over The Air) structures
+struct FOTAManifest
+{
+    String version;
+    uint32_t size;
+    String hash;
+    uint16_t chunk_size;
+    uint16_t total_chunks;
+    bool valid;
+    
+    void reset()
+    {
+        version = "";
+        size = 0;
+        hash = "";
+        chunk_size = 0;
+        total_chunks = 0;
+        valid = false;
+    }
+};
+
+struct FOTAChunk
+{
+    uint16_t chunk_number;
+    String data;           // Base64 encoded chunk data
+    String mac;            // HMAC of chunk data
+    uint16_t total_chunks;
+    bool valid;
+    
+    void reset()
+    {
+        chunk_number = 0;
+        data = "";
+        mac = "";
+        total_chunks = 0;
+        valid = false;
+    }
+};
+
+class ESP8266FOTA
+{
+public:
+    ESP8266FOTA();
+    
+    // Initialization
+    void begin();
+    void reset();
+    
+    // Status queries
+    bool isUpdateInProgress() const { return update_in_progress_; }
+    bool isManifestReceived() const { return manifest_received_; }
+    bool hasLastChunkInfo() const { return last_chunk_received_ > 0; }
+    uint16_t getLastChunkReceived() const { return last_chunk_received_; }
+    bool isLastChunkVerified() const { return chunk_verified_; }
+    uint16_t getTotalChunksReceived() const { return total_chunks_received_; }
+    const FOTAManifest& getManifest() const { return manifest_; }
+    
+    // Progress information
+    float getProgress() const;
+    bool isComplete() const;
+    
+    // FOTA processing - works with secure wrapped JSON
+    bool processSecureFOTAResponse(const String &secureResponse);
+    bool processPlainFOTAResponse(const JsonObject &fotaObj);
+    
+    // Add FOTA status to config request
+    void addStatusToConfigRequest(JsonObject &requestObj) const;
+    
+    // Status display
+    void printStatus() const;
+    void printDetailedStatus() const;
+
+private:
+    // State variables
+    FOTAManifest manifest_;
+    uint16_t last_chunk_received_;
+    bool chunk_verified_;
+    bool update_in_progress_;
+    bool manifest_received_;
+    uint32_t chunks_received_bitmap_[16]; // Bitmap to track received chunks (supports up to 512 chunks)
+    uint16_t total_chunks_received_;
+    
+    // Internal processing
+    bool processManifest(const JsonObject &fota);
+    bool processChunk(const JsonObject &fota);
+    
+    // Chunk management
+    void markChunkReceived(uint16_t chunk_num);
+    bool isChunkReceived(uint16_t chunk_num) const;
+    
+    // Storage and verification
+    bool storeFirmwareChunk(uint16_t chunk_number, const String &data, const String &mac);
+    bool verifyChunkMAC(const String &data, const String &mac);
+    
+    // Validation
+    bool validateManifest(const FOTAManifest &manifest) const;
+    bool validateChunk(uint16_t chunk_number, const String &data, const String &mac) const;
+};
+
+#endif // ESP8266_FOTA_H
