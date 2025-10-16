@@ -19,6 +19,14 @@ public:
         return createSecureWrapper(payload_str);
     }
 
+    // Base64 utility functions
+    static unsigned int getBase64EncodedLength(unsigned int inputLength);
+    static unsigned int getBase64DecodedLength(const String &base64Data);
+    static unsigned int getBase64DecodedLength(const unsigned char *base64Data, unsigned int length);
+    static bool encodeBase64(const unsigned char *input, unsigned int inputLength, unsigned char *output);
+    static bool decodeBase64(const String &base64Data, unsigned char *output);
+    static bool decodeBase64(const unsigned char *input, unsigned int inputLength, unsigned char *output);
+
 private:
     static String createSecureWrapper(const String serialized_payload);
 };

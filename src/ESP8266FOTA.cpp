@@ -1,7 +1,6 @@
 #include "ESP8266FOTA.h"
 #include "ESP8266Config.h"
 #include "ESP8266Security.h"
-#include <base64.hpp>
 #include <LittleFS.h>
 #include <SHA256.h>
 
@@ -115,10 +114,10 @@ bool ESP8266FOTA::processSecureFOTAResponse(const String &secureResponse)
     }
     
     // Decode base64 payload
-    unsigned int decodedLength = decode_base64_length((unsigned char *)encodedPayload.c_str());
+    unsigned int decodedLength = ESP8266Security::getBase64DecodedLength(encodedPayload);
     unsigned char *decodedBuffer = new unsigned char[decodedLength + 1];
     
-    decode_base64((unsigned char *)encodedPayload.c_str(), decodedBuffer);
+    ESP8266Security::decodeBase64(encodedPayload, decodedBuffer);
     decodedBuffer[decodedLength] = '\0';
     
     String decodedPayload = String((char *)decodedBuffer);
@@ -466,7 +465,7 @@ bool ESP8266FOTA::storeFirmwareChunk(uint16_t chunk_number, const String &data, 
     Serial.println(filename);
 
     // Decode base64 data
-    unsigned int decodedLength = decode_base64_length((unsigned char *)data.c_str());
+    unsigned int decodedLength = ESP8266Security::getBase64DecodedLength(data);
     if (decodedLength == 0)
     {
         Serial.println("[FOTA] Error: Invalid base64 data length");
@@ -480,7 +479,7 @@ bool ESP8266FOTA::storeFirmwareChunk(uint16_t chunk_number, const String &data, 
         return false;
     }
     
-    decode_base64((unsigned char *)data.c_str(), decodedBuffer);
+    ESP8266Security::decodeBase64(data, decodedBuffer);
     
     // Write to LittleFS
     File chunkFile = LittleFS.open(filename, "w");
